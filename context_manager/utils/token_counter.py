@@ -102,6 +102,35 @@ class TokenCounter:
         # Truncate and decode
         truncated_tokens = tokens[:max_tokens]
         return self._encoder.decode(truncated_tokens)
+
+    def split_text_into_token_chunks(self, text: str, chunk_size: int, overlap: int = 0) -> list:
+        """
+        Split text into token-bounded chunks with optional overlap.
+
+        Args:
+            text: Input text to split
+            chunk_size: Target tokens per chunk
+            overlap: Overlap tokens between consecutive chunks
+
+        Returns:
+            List of string chunks
+        """
+        if not text:
+            return []
+        if chunk_size <= 0:
+            return [text]
+        tokens = self._encoder.encode(text)
+        chunks = []
+        start = 0
+        step = max(1, chunk_size - max(0, overlap))
+        while start < len(tokens):
+            end = min(len(tokens), start + chunk_size)
+            chunk = self._encoder.decode(tokens[start:end])
+            chunks.append(chunk)
+            if end == len(tokens):
+                break
+            start += step
+        return chunks
     
     def estimate_tokens(self, text: str) -> int:
         """

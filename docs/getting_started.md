@@ -213,6 +213,25 @@ for text, score in results:
     print(f"Score {score:.2f}: {text}")
 ```
 
+### Example 4: Ingesting Files and Directories
+
+```python
+from context_manager import ContextManager
+
+cm = ContextManager()
+
+# Ingest a single file
+chunks = cm.ingest_file("docs/README.md", importance=0.8)
+print(f"Ingested chunks: {chunks}")
+
+# Ingest a directory of Python and Markdown files
+total = cm.ingest_directory("./my_repo", file_types=[".py", ".md"], recursive=True, importance=0.7)
+print(f"Total chunks ingested: {total}")
+
+# Ask a question that should retrieve from ingested docs
+context = cm.build_context("How does the indexing work in this project?")
+```
+
 ## 🔍 Understanding the Components
 
 ### Memory Types

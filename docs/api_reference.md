@@ -16,6 +16,23 @@ This section provides complete API documentation for ContextManager, including a
 - [EmbeddingProvider](#embeddingprovider)
 - [LLM Adapters](#llm-adapters)
 
+### New Ingestion APIs
+
+```python
+def ingest_text(self, text: str, source_id: str, **metadata) -> int:
+    """Chunk and ingest raw text into LTM; returns number of chunks."""
+
+def ingest_file(self, path: str, **metadata) -> int:
+    """Ingest a single file into LTM; returns number of chunks."""
+
+def ingest_directory(self, path: str, file_types: Optional[Iterable[str]] = None, recursive: bool = True, **metadata) -> int:
+    """Ingest a directory of files into LTM; returns total chunks."""
+```
+
+Notes:
+- Chunks are token-bounded using `TokenCounter.split_text_into_token_chunks` with `Config.memory.ingestion_chunk_size` and `ingestion_chunk_overlap`.
+- Each chunk is added to LTM via `add_memory` and enriched with metadata: `source_type` (text/file), `source_id`, `chunk_index`, and current `session_id`/`task_id` if set.
+
 ## ContextManager
 
 The main class that orchestrates all memory and context management functionality.

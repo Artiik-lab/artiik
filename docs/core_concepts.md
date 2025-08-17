@@ -4,7 +4,7 @@ This section provides a deep understanding of ContextManager's core concepts, ar
 
 ## 🧠 Memory Architecture
 
-ContextManager implements a **dual-memory system** inspired by human memory processes, with automatic management and optimization.
+ContextManager implements a **dual-memory system** inspired by human memory processes, with automatic management and optimization. It also supports ingestion of external knowledge (files, docs, code) directly into Long‑Term Memory for retrieval alongside conversational context.
 
 ### Memory Hierarchy
 
@@ -60,6 +60,13 @@ def _evict_if_needed(self):
 - **Hierarchical summaries**: Multi-level conversation compression
 - **Persistent**: Survives across sessions
 - **Scoped**: Optional `session_id` and `task_id` scoping for isolation
+- **External ingestion**: Supports chunked ingestion of files, directories, and raw text with metadata (`source_type`, `source_id`, `chunk_index`)
+### Ingestion Pipeline (Docs/Code → LTM)
+
+1. Load content (file/directory/text)
+2. Split into token-bounded chunks (configurable size and overlap)
+3. Enrich with metadata (source_type, source_id, chunk_index, session/task scope)
+4. Store chunks via `add_memory` → FAISS index → available for retrieval
 
 **Data Structure**:
 ```python

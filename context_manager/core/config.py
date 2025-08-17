@@ -23,6 +23,9 @@ class MemoryConfig(BaseModel):
     ltm_hits_k: int = Field(default=7, description="Number of LTM hits to retrieve")
     prompt_token_budget: int = Field(default=12000, description="Max tokens for final prompt")
     summary_compression_ratio: float = Field(default=0.3, description="Compression ratio for summaries")
+    # Ingestion chunking
+    ingestion_chunk_size: int = Field(default=400, description="Tokens per ingestion chunk")
+    ingestion_chunk_overlap: int = Field(default=50, description="Token overlap between ingestion chunks")
     # Ranking weights
     similarity_weight: float = Field(default=1.0, description="Weight for vector similarity in scoring")
     recency_weight: float = Field(default=0.0, description="Weight for recency in scoring")

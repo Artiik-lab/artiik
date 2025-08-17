@@ -14,6 +14,8 @@ from ..llm.adapters import LLMAdapter, create_llm_adapter
 from ..llm.embeddings import EmbeddingProvider
 from ..utils.token_counter import TokenCounter
 import re
+import pathlib
+from typing import Iterable
 
 
 class ContextManager:
@@ -231,6 +233,93 @@ class ContextManager:
         """
         results = self.long_term_memory.search(query, k=k)
         return [(entry.text, score) for entry, score in results]
+
+    # ------------------- Ingestion API -------------------
+    def ingest_text(self, text: str, source_id: str, **metadata: Any) -> int:
+        """
+        Ingest raw text into LTM by chunking and adding as memories.
+
+        Args:
+            text: Text content to ingest
+            source_id: Identifier for this source (e.g., filename, URL)
+            **metadata: Additional metadata; session/task scope auto-injected
+
+        Returns:
+            Number of chunks ingested
+        """
+        if not text:
+            return 0
+        chunk_size = self.config.memory.ingestion_chunk_size
+        overlap = self.config.memory.ingestion_chunk_overlap
+        chunks = self.token_counter.split_text_into_token_chunks(text, chunk_size, overlap)
+        base_meta = {
+            "source_type": metadata.pop("source_type", "text"),
+            "source_id": source_id,
+        }
+        # Inject scope
+        if self.session_id is not None:
+            base_meta["session_id"] = self.session_id
+        if self.task_id is not None:
+            base_meta["task_id"] = self.task_id
+        count = 0
+        for idx, chunk in enumerate(chunks):
+            md = base_meta.copy()
+            md.update(metadata)
+            md["chunk_index"] = idx
+            self.long_term_memory.add_memory(chunk, md)
+            count += 1
+        return count
+
+    def ingest_file(self, path: str, **metadata: Any) -> int:
+        """
+        Ingest a single file (text-based) into LTM.
+
+        Args:
+            path: File path
+            **metadata: Additional metadata, e.g., importance
+
+        Returns:
+            Number of chunks ingested
+        """
+        p = pathlib.Path(path)
+        if not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+        try:
+            content = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            raise RuntimeError(f"Failed to read file {path}: {e}")
+        return self.ingest_text(content, source_id=str(p), source_type="file", **metadata)
+
+    def ingest_directory(self, path: str, file_types: Optional[Iterable[str]] = None, recursive: bool = True, **metadata: Any) -> int:
+        """
+        Ingest a directory of files into LTM.
+
+        Args:
+            path: Directory path
+            file_types: Optional list of extensions to include (e.g., [".py", ".md"])
+            recursive: Recurse into subdirectories
+            **metadata: Additional metadata
+
+        Returns:
+            Total ingested chunks across files
+        """
+        p = pathlib.Path(path)
+        if not p.exists() or not p.is_dir():
+            raise FileNotFoundError(f"Directory not found: {path}")
+        exts = set([e.lower() for e in (file_types or [])])
+        globber = p.rglob("*") if recursive else p.glob("*")
+        total = 0
+        for f in globber:
+            if not f.is_file():
+                continue
+            if exts and f.suffix.lower() not in exts:
+                continue
+            try:
+                total += self.ingest_file(str(f), **metadata)
+            except Exception:
+                # Skip unreadable files, continue
+                continue
+        return total
     
     def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """
