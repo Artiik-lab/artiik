@@ -1,500 +1,327 @@
 # Core Concepts
 
-This section provides a deep understanding of ContextManager's core concepts, architecture, and how the different components work together to provide intelligent context management for AI agents.
+This guide explains the fundamental concepts behind ContextManager and how it manages memory and context for AI agents.
 
 ## 🧠 Memory Architecture
 
-ContextManager implements a **dual-memory system** inspired by human memory processes, with automatic management and optimization.
-
-### Memory Hierarchy
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ContextManager                          │
-├─────────────────────────────────────────────────────────────┤
-│  Short-Term Memory (STM)    │  Long-Term Memory (LTM)    │
-│  ┌─────────────────────┐    │  ┌─────────────────────┐    │
-│  │ Recent Turns        │    │  │ Vector Store        │    │
-│  │ Token-aware         │    │  │ Semantic Search     │    │
-│  │ Fast Access         │    │  │ Hierarchical Sums   │    │
-│  │ Auto-eviction       │    │  │ Persistent          │    │
-│  └─────────────────────┘    │  └─────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-```
+ContextManager uses a dual-memory architecture inspired by human memory systems:
 
 ### Short-Term Memory (STM)
 
-**Purpose**: Store recent conversation turns for immediate context access.
+**Purpose**: Stores recent conversation turns for immediate access.
 
 **Characteristics**:
-- **Token-aware**: Tracks exact token count of each turn
-- **Bounded capacity**: Configurable maximum tokens (default: 8,000)
-- **Fast access**: O(1) append and retrieval operations
-- **Automatic eviction**: Oldest turns removed when capacity exceeded
+- **Fast Access**: Recent turns are immediately available
+- **Token-Aware**: Automatically manages memory within token limits
+- **Automatic Eviction**: Oldest turns are summarized and moved to LTM when capacity is reached
+- **Configurable**: Size and behavior can be tuned via `MemoryConfig.stm_capacity`
 
-**Data Structure**:
+**Usage**:
 ```python
-@dataclass
-class Turn:
-    user_input: str
-    assistant_response: str
-    token_count: int
-    timestamp: float
-```
-
-**Eviction Process**:
-```python
-def _evict_if_needed(self):
-    while self.current_tokens > self.max_tokens and self.turns:
-        oldest_turn = self.turns.popleft()
-        self.current_tokens -= oldest_turn.token_count
+# Recent turns are automatically included in context
+context = cm.build_context("What did we just discuss?")
+# STM provides immediate access to recent conversation
 ```
 
 ### Long-Term Memory (LTM)
 
-**Purpose**: Store semantic representations of conversations for future retrieval.
+**Purpose**: Stores semantic memories and summaries for long-term recall.
 
 **Characteristics**:
-- **Vector-based**: FAISS index for similarity search
-- **Semantic search**: Find relevant memories by meaning
-- **Hierarchical summaries**: Multi-level conversation compression
-- **Persistent**: Survives across sessions
-- **Scoped**: Optional `session_id` and `task_id` scoping for isolation
+- **Vector-Based**: Uses FAISS for efficient similarity search
+- **Semantic Search**: Finds relevant memories based on meaning, not just keywords
+- **Persistent**: Survives across sessions and can be saved to disk
+- **Hierarchical**: Stores both original memories and summaries
 
-**Data Structure**:
+**Usage**:
 ```python
-@dataclass
-class MemoryEntry:
-    id: str
-    text: str
-    embedding: np.ndarray
-    metadata: Dict[str, Any]
-    timestamp: float
+# Query for relevant memories
+results = cm.query_memory("Python programming", k=5)
+# LTM finds semantically similar memories
 ```
 
-**Search Process**:
+## 🔄 Context Building Process
+
+ContextManager follows a systematic process to build optimized context:
+
+### 1. Retrieve Recent Context
+
 ```python
-def search(self, query: str, k: int = 7):
-    query_embedding = self.embedding_provider.embed_single(query)
-    distances, indices = self.index.search(query_embedding.reshape(1, -1), k)
-    similarities = 1 - distances[0] / np.max(distances[0])
-    return [(self.entries[idx], similarity) for idx, similarity in zip(indices[0], similarities)]
+# Get last N turns from STM
+recent_turns = stm.get_recent_turns(config.memory.recent_k)
 ```
+
+**Purpose**: Ensure immediate context is always available.
+
+### 2. Search Long-Term Memory
+
+```python
+# Find relevant memories via vector similarity
+ltm_results = ltm.search(user_input, k=config.memory.ltm_hits_k)
+```
+
+**Purpose**: Retrieve semantically relevant historical context.
+
+### 3. Assemble Context
+
+```python
+# Combine recent + relevant + current input
+context = assemble_context(recent_turns, ltm_results, user_input)
+```
+
+**Purpose**: Create comprehensive context from multiple sources.
+
+### 4. Optimize for Token Budget
+
+```python
+# Truncate to fit within budget
+final_context = truncate_to_budget(context, config.memory.prompt_token_budget)
+```
+
+**Purpose**: Ensure context fits within LLM token limits.
 
 ## 📝 Hierarchical Summarization
 
-ContextManager implements a **hierarchical summarization system** that automatically compresses conversations while preserving important information.
+When STM capacity is exceeded, ContextManager automatically summarizes and offloads memories:
 
-### Summarization Levels
+### Summarization Process
 
-```
-Conversation Turns (Raw)
-    ↓
-Chunk Summaries (2000 tokens each)
-    ↓
-Session Summaries (Multiple chunks)
-    ↓
-Topic Summaries (Related sessions)
-    ↓
-Lifetime Summaries (All topics)
-```
+1. **Chunk Selection**: Oldest turns are grouped into chunks based on `chunk_size`
+2. **LLM Summarization**: Each chunk is summarized using the configured LLM
+3. **Metadata Creation**: Summary includes metadata about original turns
+4. **LTM Storage**: Summaries are stored in LTM with vector embeddings
 
-### Chunk-Level Summarization
+### Example
 
-**Process**:
-1. **Chunking**: Group turns into fixed-size chunks (default: 2,000 tokens)
-2. **Summarization**: Use LLM to create concise summaries
-3. **Storage**: Store summaries in LTM with metadata (includes optional `session_id`/`task_id`)
-
-**Prompt Template**:
-```
-Summarize the following conversation chunk in a concise way, preserving key information, decisions, and context that might be important for future reference. Focus on:
-
-1. Main topics discussed
-2. Key decisions made
-3. Important facts or information shared
-4. User preferences or requirements mentioned
-5. Any action items or next steps
-
-Conversation chunk:
-{text}
-
-Summary:
-```
-
-**Compression Ratio**: ~30% of original size while preserving key information.
-
-### Hierarchical Summarization
-
-**Process**:
-1. **Collection**: Gather multiple chunk summaries
-2. **Combination**: Use LLM to create higher-level summaries
-3. **Recursion**: Repeat until desired hierarchy level reached
-
-**Prompt Template**:
-```
-Create a higher-level summary of the following conversation summaries. This should provide an overview of the entire conversation session, highlighting:
-
-1. Overall purpose and goals
-2. Major topics covered
-3. Key outcomes and decisions
-4. Important patterns or themes
-5. Context that would be useful for future interactions
-
-Summaries to combine:
-{summaries}
-
-Hierarchical Summary:
-```
-
-## 💰 Token Budget Management
-
-ContextManager implements sophisticated **token budget management** to optimize context usage within LLM limits.
-
-### Budget Allocation
-
-```
-Total Token Budget (e.g., 12,000 tokens)
-├── Recent Turns (5 turns × ~200 tokens = 1,000)
-├── LTM Results (7 results × ~150 tokens = 1,050)
-├── Current Input (~100 tokens)
-├── System Instructions (~200 tokens)
-└── Buffer (~8,650 tokens remaining)
-```
-
-### Optimization Strategies
-
-**1. Priority-Based Assembly**:
 ```python
-def build_context(self, user_input: str) -> str:
-    # 1. Get recent turns (highest priority)
-    recent_turns = self.short_term_memory.get_recent_turns(self.config.memory.recent_k)
-    
-    # 2. Search LTM (medium priority)
-    ltm_results = self.long_term_memory.search(user_input, k=self.config.memory.ltm_hits_k)
-    
-    # 3. Assemble context
-    context_parts = [recent_texts, ltm_texts, user_input]
-    full_context = "\n\n".join(context_parts)
-    
-    # 4. Truncate if necessary
-    return self.token_counter.truncate_to_tokens(full_context, self.config.memory.prompt_token_budget)
-```
+# Original conversation (8 turns, 6000 tokens)
+conversation = [
+    "User: Hello!", "Assistant: Hi there!",
+    "User: How are you?", "Assistant: I'm doing well!",
+    "User: What's the weather?", "Assistant: I can't check the weather.",
+    "User: Tell me about Python", "Assistant: Python is a programming language..."
+]
 
-**2. Hybrid Retrieval + Intelligent Truncation**:
-```python
-def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
-    tokens = self._encoder.encode(text)
-    if len(tokens) <= max_tokens:
-        return text
-    
-    # Truncate and decode
-    truncated_tokens = tokens[:max_tokens]
-    return self._encoder.decode(truncated_tokens)
-```
-
-**3. Similarity-Based Pruning with Keyword Prefilter**:
-```python
-# Filter LTM results by similarity score
-ltm_texts = [entry.text for entry, score in ltm_results if score > 0.5]
-```
-
-## 🔄 Context Orchestration Engine
-
-The **Context Orchestration Engine** is the "brainstem" that coordinates all components and manages the flow of information.
-
-### Main Flow
-
-```
-User Input
-    ↓
-ContextManager.observe()
-    ↓
-Add to STM
-    ↓
-Check capacity
-    ↓
-If overflow: summarize_and_offload()
-    ↓
-ContextManager.build_context()
-    ↓
-Retrieve recent turns
-    ↓
-Search LTM
-    ↓
-Assemble context
-    ↓
-Optimize tokens
-    ↓
-Return context
-```
-
-### Key Methods
-
-**1. Observe Interaction**:
-```python
-def observe(self, user_input: str, assistant_response: str):
-    # Add to short-term memory
-    self.short_term_memory.add_turn(user_input, assistant_response)
-    
-    # Check if we need to summarize and offload
-    if self.short_term_memory.current_tokens > self.config.memory.stm_capacity:
-        self._summarize_and_offload()
-```
-
-**2. Build Context**:
-```python
-def build_context(self, user_input: str) -> str:
-    # Get recent turns from STM
-    recent_turns = self.short_term_memory.get_recent_turns(self.config.memory.recent_k)
-    recent_texts = [turn.text for turn in recent_turns]
-    
-    # Search LTM for relevant memories
-    ltm_results = self.long_term_memory.search(user_input, k=self.config.memory.ltm_hits_k)
-    ltm_texts = [entry.text for entry, score in ltm_results if score > 0.5]
-    
-    # Assemble and optimize
-    context_parts = [recent_texts, ltm_texts, user_input]
-    full_context = "\n\n".join(context_parts)
-    return self.token_counter.truncate_to_tokens(full_context, self.config.memory.prompt_token_budget)
-```
-
-**3. Summarize and Offload**:
-```python
-def _summarize_and_offload(self):
-    # Get chunk for summarization
-    chunk, chunk_tokens = self.short_term_memory.get_chunk_for_summarization(
-        self.config.memory.chunk_size
-    )
-    
-    # Generate summary
-    summary = self.summarizer.summarize_chunk(chunk)
-    
-    # Add to long-term memory
-    memory_id = self.long_term_memory.add_memory(summary, metadata)
+# After summarization (1 summary, 200 tokens)
+summary = "User greeted assistant, asked about weather and Python programming. Assistant responded positively and explained Python basics."
 ```
 
 ## 🔍 Vector Similarity Search
 
-ContextManager uses **FAISS** (Facebook AI Similarity Search) for efficient vector similarity search in long-term memory.
+LTM uses FAISS for efficient vector similarity search:
 
-### Embedding Process
+### Embedding Generation
 
-**1. Text Embedding**:
 ```python
-def embed_single(self, text: str) -> np.ndarray:
-    return self.model.encode([text])[0]
+# Text is converted to vector embeddings
+embedding = embedding_provider.get_embedding("Python programming")
+# Default: 384-dimensional vectors using sentence-transformers
 ```
 
-**2. Similarity Calculation**:
+### Similarity Search
+
 ```python
-def similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
-    norm1 = np.linalg.norm(embedding1)
-    norm2 = np.linalg.norm(embedding2)
-    similarity = np.dot(embedding1, embedding2) / (norm1 * norm2)
-    return float(similarity)
+# Query is embedded and compared to stored embeddings
+query_embedding = embedding_provider.get_embedding("programming languages")
+results = faiss_index.search(query_embedding, k=5)
+# Returns most similar memories with similarity scores
 ```
 
-### Search Process
+### Ranking Factors
 
-**1. Query Embedding**:
+Results are ranked using configurable weights:
+
 ```python
-query_embedding = self.embedding_provider.embed_single(query)
+# Final score = similarity_weight * similarity + 
+#               recency_weight * recency_decay + 
+#               importance_weight * importance
 ```
 
-**2. FAISS Search**:
+## 💰 Token Budget Management
+
+ContextManager implements intelligent token budget management:
+
+### Budget Allocation
+
 ```python
-distances, indices = self.index.search(query_embedding.reshape(1, -1), k)
+# Example budget breakdown
+config = MemoryConfig(
+    stm_capacity=8000,          # STM limit
+    prompt_token_budget=12000,  # Final context limit
+    recent_k=5,                 # Recent turns
+    ltm_hits_k=7,              # LTM results
+)
 ```
 
-**3. Similarity Conversion**:
+### Optimization Strategy
+
+1. **LTM Results**: Drop least relevant LTM hits first
+2. **Recent Turns**: Drop oldest recent turns if needed
+3. **Hard Truncation**: Token-level truncation as last resort
+
+### Example Budget Usage
+
 ```python
-similarities = 1 - distances[0] / np.max(distances[0])
+# Typical budget breakdown
+recent_context = 2000 tokens    # Last 5 turns
+ltm_context = 5000 tokens       # 7 most relevant memories
+user_input = 500 tokens         # Current input
+total = 7500 tokens            # Within 12000 budget
 ```
 
-**4. Result Filtering**:
+## 🎯 Memory Scoping
+
+ContextManager supports memory isolation through session and task scoping:
+
+### Session Scoping
+
 ```python
-results = [(self.entries[idx], similarity) for idx, similarity in zip(indices[0], similarities)]
-results.sort(key=lambda x: x[1], reverse=True)  # Sort by similarity
+# Each user gets isolated memory
+user1_cm = ContextManager(session_id="user1")
+user2_cm = ContextManager(session_id="user2")
+
+# Memories are isolated by default
+user1_cm.observe("I like Python", "Python is great!")
+user2_cm.observe("I like JavaScript", "JavaScript is awesome!")
+
+# Queries only return memories from the same session
+```
+
+### Task Scoping
+
+```python
+# Different tasks within the same session
+planning_cm = ContextManager(session_id="user1", task_id="vacation_planning")
+coding_cm = ContextManager(session_id="user1", task_id="python_coding")
+
+# Memories are isolated by task
+planning_cm.observe("I want to visit Japan", "Japan is beautiful!")
+coding_cm.observe("I need to fix this bug", "Let's debug this together!")
+```
+
+### Cross-Scope Access
+
+```python
+# Enable cross-scope access when needed
+shared_cm = ContextManager(
+    session_id="shared",
+    allow_cross_session=True,
+    allow_cross_task=True
+)
+```
+
+## 📊 Memory Persistence
+
+LTM can be persisted to disk for long-term storage:
+
+### Save Memory
+
+```python
+# Save to directory
+cm.save_memory("./memory_backup")
+# Creates: memory_backup/index.faiss, memory_backup/entries.json
+```
+
+### Load Memory
+
+```python
+# Load from directory
+new_cm = ContextManager()
+new_cm.load_memory("./memory_backup")
+# Memory is restored with all embeddings and metadata
+```
+
+## 🔧 Configuration Philosophy
+
+ContextManager follows a "configure for your use case" philosophy:
+
+### Performance vs Quality Trade-offs
+
+```python
+# Fast configuration
+fast_config = MemoryConfig(
+    recent_k=3,        # Fewer recent turns
+    ltm_hits_k=5,      # Fewer LTM results
+    chunk_size=1000,   # Smaller chunks
+)
+
+# Quality configuration
+quality_config = MemoryConfig(
+    recent_k=10,       # More recent turns
+    ltm_hits_k=10,     # More LTM results
+    chunk_size=2000,   # Larger chunks
+    prompt_token_budget=16000,  # Larger context
+)
+```
+
+### Memory vs Speed Trade-offs
+
+```python
+# Memory-constrained
+constrained_config = MemoryConfig(
+    stm_capacity=4000,  # Smaller STM
+    prompt_token_budget=6000,  # Smaller context
+)
+
+# Speed-optimized
+speed_config = MemoryConfig(
+    recent_k=3,        # Fewer recent turns
+    ltm_hits_k=5,      # Fewer LTM results
+)
 ```
 
 ## 🎯 Use Case Patterns
 
-### Pattern 1: Long Conversations
+### Long Conversations
 
-**Problem**: Maintaining context across 100+ conversation turns.
-
-**Solution**:
 ```python
-# Automatic summarization prevents context overflow
-for turn in long_conversation:
-    cm.observe(turn.user_input, turn.assistant_response)
-    # ContextManager automatically summarizes old turns
-```
-
-### Pattern 2: Multi-Topic Discussions
-
-**Problem**: Switching between topics without losing context.
-
-**Solution**:
-```python
-# Vector similarity finds relevant past discussions
-context = cm.build_context("What did we discuss about Python?")
-# Automatically retrieves relevant memories about Python
-```
-
-### Pattern 3: Information Retrieval
-
-**Problem**: Finding specific information from conversation history.
-
-**Solution**:
-```python
-# Semantic search across all memories
-results = cm.query_memory("budget planning", k=5)
-for text, score in results:
-    print(f"Score {score:.2f}: {text}")
-```
-
-### Pattern 4: Tool-Using Agents
-
-**Problem**: Agents with tools but no built-in memory.
-
-**Solution**:
-```python
-class ToolAgent:
-    def __init__(self):
-        self.cm = ContextManager()  # Provides memory layer
-        self.tools = {...}          # Agent tools
+# ContextManager automatically handles long conversations
+for i in range(100):
+    cm.observe(f"Turn {i}", f"Response {i}")
     
-    def respond(self, user_input: str):
-        context = self.cm.build_context(user_input)  # Memory-enhanced context
-        response = call_llm_with_tools(context, self.tools)
-        self.cm.observe(user_input, response)  # Update memory
-        return response
+# Context remains relevant through summarization
+context = cm.build_context("What did we discuss earlier?")
 ```
 
-## ⚡ Performance Characteristics
-
-### Time Complexity
-
-- **STM operations**: O(1) append/pop
-- **LTM search**: O(log N) with FAISS HNSW
-- **Context building**: O(k) where k = recent turns + LTM hits
-- **Summarization**: O(n) where n = chunk size
-
-### Space Complexity
-
-- **STM**: O(max_tokens) - bounded by configuration
-- **LTM**: O(N) where N = number of memory entries
-- **Embeddings**: O(N × dimension) for FAISS index
-
-### Memory Usage
-
-- **Default STM**: ~8,000 tokens ≈ 32KB
-- **Default LTM**: ~100 entries × 384 dimensions ≈ 150KB
-- **Embedding model**: ~90MB (sentence-transformers)
-
-## 🔧 Configuration Trade-offs
-
-### Speed vs. Quality
+### Multi-Topic Discussions
 
 ```python
-# Fast configuration
-config = Config(
-    memory=MemoryConfig(
-        recent_k=3,        # Fewer recent turns
-        ltm_hits_k=5,      # Fewer LTM results
-        chunk_size=1000,   # Smaller chunks
-    )
-)
+# Seamless topic switching
+cm.observe("Let's talk about Python", "Python is great!")
+cm.observe("What about cooking?", "Cooking is fun!")
+cm.observe("Back to Python - what are decorators?", "Decorators are...")
 
-# Quality configuration
-config = Config(
-    memory=MemoryConfig(
-        recent_k=10,       # More recent turns
-        ltm_hits_k=15,     # More LTM results
-        chunk_size=3000,   # Larger chunks
-    )
-)
+# Context includes relevant information from both topics
 ```
 
-### Memory vs. Performance
+### Information Retrieval
 
 ```python
-# Memory-constrained
-config = Config(
-    memory=MemoryConfig(
-        stm_capacity=4000,     # Smaller STM
-        prompt_token_budget=6000,  # Smaller context
-    )
-)
-
-# Performance-optimized
-config = Config(
-    memory=MemoryConfig(
-        stm_capacity=16000,    # Larger STM
-        prompt_token_budget=24000,  # Larger context
-    )
-)
+# Query specific information
+results = cm.query_memory("budget planning", k=3)
+# Returns relevant memories even from long conversations
 ```
 
-## 🚨 Failure Modes and Mitigations
+## 🔍 Debugging and Monitoring
 
-### 1. Embedding Model Failures
+### Memory Statistics
 
-**Failure**: Model download or loading fails.
-
-**Mitigation**:
 ```python
-try:
-    self.model = SentenceTransformer(self.model_name)
-except Exception as e:
-    # Fallback to smaller model
-    self.model = SentenceTransformer("all-MiniLM-L6-v2")
+stats = cm.get_stats()
+print(f"STM turns: {stats['short_term_memory']['num_turns']}")
+print(f"LTM entries: {stats['long_term_memory']['num_entries']}")
+print(f"STM utilization: {stats['short_term_memory']['utilization']:.2%}")
 ```
 
-### 2. LLM API Failures
+### Context Building Debug
 
-**Failure**: Summarization or generation fails.
-
-**Mitigation**:
 ```python
-try:
-    summary = self.llm_adapter.generate_sync(prompt)
-except Exception as e:
-    # Fallback: simple concatenation
-    return f"Conversation chunk: {combined_text[:200]}..."
-```
-
-### 3. Token Budget Exceeded
-
-**Failure**: Context exceeds token limit.
-
-**Mitigation**:
-```python
-# Intelligent truncation
-if self.token_counter.count_tokens(full_context) > self.config.memory.prompt_token_budget:
-    full_context = self.token_counter.truncate_to_tokens(
-        full_context, 
-        self.config.memory.prompt_token_budget
-    )
-```
-
-### 4. Memory Overflow
-
-**Failure**: Too many memories or embeddings.
-
-**Mitigation**:
-```python
-# Configurable limits
-config = Config(
-    memory=MemoryConfig(
-        stm_capacity=8000,  # Bounded STM
-        ltm_hits_k=7,       # Limited LTM results
-    )
-)
+debug_info = cm.debug_context_building("What did we discuss?")
+print(f"Recent turns: {debug_info['recent_turns_count']}")
+print(f"LTM hits: {debug_info['ltm_results_count']}")
+print(f"Final tokens: {debug_info['final_context_tokens']}")
 ```
 
 ---
 
-**Next**: [API Reference](./api_reference.md) → Complete API documentation and reference 
+**Ready to dive deeper?** → [API Reference](./api_reference.md) | **See examples?** → [Examples](./examples.md) 

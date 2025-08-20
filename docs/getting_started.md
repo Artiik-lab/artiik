@@ -13,21 +13,21 @@ This guide will help you get up and running with ContextManager quickly. You'll 
 ### Install ContextManager
 
 ```bash
-pip install context-manager
+pip install artiik
 ```
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/contextmanager/context-manager.git
-cd context-manager
+git clone https://github.com/BoualamHamza/Context-Manager.git
+cd Context-Manager
 pip install -e .
 ```
 
 ### Verify Installation
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 print("✅ ContextManager installed successfully!")
 ```
 
@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY="your-anthropic-api-key"
 Here's the simplest way to use ContextManager:
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 # Initialize with default settings
 cm = ContextManager()
@@ -67,7 +67,7 @@ cm.observe(user_input, response)
 Customize ContextManager for your needs:
 
 ```python
-from context_manager import Config, ContextManager
+from artiik import Config, ContextManager
 
 # Create custom configuration
 config = Config(
@@ -99,12 +99,12 @@ config = Config(
 cm = ContextManager(config)
 ```
 
-## 🚀 Quick Examples
+## 🚀 Your First Integration
 
-### Example 1: Simple Agent Integration
+### Simple Agent with ContextManager
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 import openai
 
 # Initialize
@@ -112,10 +112,10 @@ cm = ContextManager()
 openai.api_key = "your-api-key"
 
 def simple_agent(user_input: str) -> str:
-    # Build context
+    # Build context from memory
     context = cm.build_context(user_input)
     
-    # Call LLM
+    # Call your LLM
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[{"role": "user", "content": context}],
@@ -125,106 +125,84 @@ def simple_agent(user_input: str) -> str:
     # Get response
     assistant_response = response.choices[0].message.content
     
-    # Observe interaction
+    # Store the interaction in memory
     cm.observe(user_input, assistant_response)
     
     return assistant_response
 
-# Usage
-response = simple_agent("Tell me about Python programming")
+# Use the agent
+response = simple_agent("Hello! I'm planning a trip to Japan.")
 print(response)
 ```
 
-### Example 2: Tool-Using Agent
+### Memory Querying
 
 ```python
-from context_manager import ContextManager
-from context_manager.llm.adapters import create_llm_adapter
-
-class ToolAgent:
-    def __init__(self):
-        self.cm = ContextManager()
-        self.llm = create_llm_adapter("openai", api_key="your-key")
-        self.tools = {
-            "search": self._search_web,
-            "calculate": self._calculate,
-            "get_weather": self._get_weather
-        }
-    
-    def _search_web(self, query: str) -> str:
-        return f"Search results for: {query}"
-    
-    def _calculate(self, expression: str) -> str:
-        try:
-            return f"Result: {eval(expression)}"
-        except:
-            return "Error: Invalid expression"
-    
-    def _get_weather(self, location: str) -> str:
-        return f"Weather in {location}: 72°F, sunny"
-    
-    def respond(self, user_input: str) -> str:
-        # Build context with tool information
-        context = self.cm.build_context(user_input)
-        tool_prompt = f"""
-You have access to these tools:
-- search: Search the web
-- calculate: Perform calculations
-- get_weather: Get weather information
-
-User: {context}
-"""
-        
-        # Generate response
-        response = self.llm.generate_sync(tool_prompt)
-        
-        # Observe interaction
-        self.cm.observe(user_input, response)
-        
-        return response
-
-# Usage
-agent = ToolAgent()
-response = agent.respond("What's 15 * 23?")
-print(response)
-```
-
-### Example 3: Memory Querying
-
-```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 cm = ContextManager()
 
 # Add some conversation history
 conversation = [
     ("I'm planning a trip to Japan", "That sounds exciting!"),
-    ("I want to visit Tokyo and Kyoto", "Great choices! Tokyo is modern, Kyoto is traditional."),
-    ("What's the best time to visit?", "Spring for cherry blossoms or fall for autumn colors."),
-    ("How much should I budget?", "Around $200-300 per day for a comfortable trip.")
+    ("I want to visit Tokyo and Kyoto", "Great choices!"),
+    ("What's the best time to visit?", "Spring for cherry blossoms!"),
+    ("How much should I budget?", "Around $200-300 per day.")
 ]
 
 for user_input, response in conversation:
     cm.observe(user_input, response)
 
-# Query memory
+# Query memory for specific information
 results = cm.query_memory("Japan budget", k=3)
 for text, score in results:
     print(f"Score {score:.2f}: {text}")
 ```
 
-## 🔍 Understanding the Components
+### Indexing External Data
+
+```python
+from artiik import ContextManager
+
+cm = ContextManager()
+
+# Ingest a single file
+chunks = cm.ingest_file("docs/README.md", importance=0.8)
+print(f"Ingested {chunks} chunks from README.md")
+
+# Ingest a directory
+total = cm.ingest_directory(
+    "./my_repo",
+    file_types=[".py", ".md"],
+    recursive=True,
+    importance=0.7,
+)
+print(f"Total chunks ingested: {total}")
+
+# Now you can ask questions about your indexed data
+context = cm.build_context("Where is authentication handled?")
+```
+
+## 🔍 Understanding the Workflow
+
+### The ContextManager Workflow
+
+1. **Initialize**: Create a ContextManager instance with your configuration
+2. **Build Context**: Call `build_context(user_input)` to get optimized context
+3. **Call LLM**: Use the context with your language model
+4. **Observe**: Call `observe(user_input, response)` to store the interaction
+5. **Repeat**: The cycle continues, building richer context over time
 
 ### Memory Types
 
 **Short-Term Memory (STM):**
 - Stores recent conversation turns
-- Token-aware with automatic eviction
+- Automatically managed within token limits
 - Fast access for immediate context
 
 **Long-Term Memory (LTM):**
-- Vector-based semantic storage
-- Hierarchical summaries
+- Vector-based semantic storage using FAISS
+- Stores summaries and external data
 - Persistent across sessions
 
 ### Context Building Process
@@ -235,26 +213,12 @@ for text, score in results:
 4. **Optimize**: Truncate to fit token budget
 5. **Return**: Optimized context for LLM
 
-### Token Budget Management
-
-```python
-# Example token budget breakdown
-config = Config(
-    memory=MemoryConfig(
-        stm_capacity=8000,          # STM limit
-        prompt_token_budget=12000,  # Final context limit
-        recent_k=5,                 # Recent turns
-        ltm_hits_k=7,              # LTM results
-    )
-)
-```
-
-## 🛠️ Configuration Options
+## 🛠️ Configuration Deep Dive
 
 ### Memory Configuration
 
 ```python
-from context_manager import MemoryConfig
+from artiik import MemoryConfig
 
 memory_config = MemoryConfig(
     stm_capacity=8000,              # Max tokens in short-term memory
@@ -263,13 +227,21 @@ memory_config = MemoryConfig(
     ltm_hits_k=7,                   # Number of LTM results to retrieve
     prompt_token_budget=12000,      # Max tokens for final context
     summary_compression_ratio=0.3,  # Summary compression target
+    # Ingestion settings
+    ingestion_chunk_size=400,       # Tokens per ingestion chunk
+    ingestion_chunk_overlap=50,     # Token overlap between chunks
+    # Ranking weights
+    similarity_weight=1.0,          # Weight for vector similarity
+    recency_weight=0.0,             # Weight for recency
+    importance_weight=0.0,          # Weight for importance
+    recency_half_life_seconds=604800.0,  # Half-life for recency decay (7 days)
 )
 ```
 
 ### LLM Configuration
 
 ```python
-from context_manager import LLMConfig
+from artiik import LLMConfig
 
 llm_config = LLMConfig(
     provider="openai",              # "openai" or "anthropic"
@@ -283,7 +255,7 @@ llm_config = LLMConfig(
 ### Vector Store Configuration
 
 ```python
-from context_manager import VectorStoreConfig
+from artiik import VectorStoreConfig
 
 vector_config = VectorStoreConfig(
     provider="faiss",              # Vector database provider
@@ -320,11 +292,11 @@ print(f"LTM hits: {debug_info['ltm_results_count']}")
 print(f"Final tokens: {debug_info['final_context_tokens']}")
 ```
 
-## 🚨 Common Issues
+## 🚨 Common Setup Issues
 
-### 1. API Key Issues
+### 1. Missing API Key
 
-```python
+```bash
 # Error: Missing API key
 # Solution: Set environment variable
 export OPENAI_API_KEY="your-key"
@@ -332,13 +304,21 @@ export OPENAI_API_KEY="your-key"
 
 ### 2. Model Download Issues
 
-```python
+```bash
 # Error: Failed to load embedding model
 # Solution: Check internet connection and disk space
 # The model (~90MB) will be downloaded on first use
 ```
 
-### 3. Memory Issues
+### 3. Import Errors
+
+```python
+# Error: ModuleNotFoundError: No module named 'context_manager'
+# Solution: Install the package correctly
+pip install artiik
+```
+
+### 4. Memory Issues
 
 ```python
 # Error: Out of memory
@@ -351,19 +331,6 @@ config = Config(
 )
 ```
 
-### 4. Performance Issues
-
-```python
-# Slow context building
-# Solution: Adjust configuration
-config = Config(
-    memory=MemoryConfig(
-        recent_k=3,        # Reduce from 5
-        ltm_hits_k=5,      # Reduce from 7
-    )
-)
-```
-
 ## 📈 Next Steps
 
 Now that you have ContextManager set up, explore:
@@ -372,7 +339,24 @@ Now that you have ContextManager set up, explore:
 - **[API Reference](./api_reference.md)**: Complete API documentation
 - **[Examples](./examples.md)**: Advanced usage patterns
 - **[Advanced Usage](./advanced_usage.md)**: Custom implementations
+- **[Troubleshooting](./troubleshooting.md)**: Common issues and solutions
+
+## 🧪 Testing Your Setup
+
+Run the demo to test your installation:
+
+```bash
+# From the project root
+python demo.py
+```
+
+Or run individual demos:
+
+```bash
+python demos/demo_basic_chat.py
+python demos/demo_openai_chat.py
+```
 
 ---
 
-**Next**: [Core Concepts](./core_concepts.md) → Understand the memory architecture and concepts 
+**Ready to dive deeper?** → [Core Concepts](./core_concepts.md) 

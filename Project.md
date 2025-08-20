@@ -65,7 +65,7 @@ All done **automatically in the background** — just by plugging the agent into
 In your agent code:
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 cm = ContextManager()
 

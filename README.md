@@ -1,11 +1,11 @@
-# ContextManager
+# ContextManager (by Artiik)
 
-A modular, plug-and-play memory and context management layer for AI agents that automatically handles context window limitations without requiring a complete redesign of your agent architecture.
+A professional, plug-and-play memory and context orchestration layer for AI agents. ContextManager abstracts away context-window limits by automatically managing short-term memory, long-term semantic recall, and hierarchical summarization to assemble high-signal, token-budgeted prompts for your models.
 
 ## 🚀 Quick Start
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 # Initialize with default settings
 cm = ContextManager()
@@ -17,24 +17,27 @@ response = call_llm(context)  # Your LLM call
 cm.observe(user_input, response)
 ```
 
-## 📚 Documentation
+## 📦 Installation
 
-**📖 [Full Documentation](docs/index.md)** - Complete guides, API reference, and examples
+```bash
+pip install artiik
+```
 
-- **[Getting Started](docs/getting_started.md)** - Installation and basic usage
-- **[Core Concepts](docs/core_concepts.md)** - Memory architecture and design
-- **[API Reference](docs/api_reference.md)** - Complete API documentation
-- **[Examples](docs/examples.md)** - Real-world usage patterns
-- **[Advanced Usage](docs/advanced_usage.md)** - Custom implementations
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
-- **[Architecture](docs/architecture.md)** - System design and performance
+Or install from source:
+
+```bash
+git clone https://github.com/BoualamHamza/Context-Manager.git
+cd Context-Manager
+pip install -e .
+```
 
 ## 🧩 Key Features
 
 - **🔧 Drop-in Integration**: Works with existing agents without architecture changes
 - **🧠 Intelligent Memory**: Automatic short-term and long-term memory management
 - **📝 Hierarchical Summarization**: Multi-level conversation summarization
-- **🔍 Semantic Search**: Vector-based memory retrieval
+- **🔍 Semantic Search**: Vector-based memory retrieval with FAISS
+- **📥 External Indexing**: Ingest files and directories into long-term memory
 - **💰 Token Optimization**: Smart context assembly within budget constraints
 - **🔄 Multi-LLM Support**: OpenAI, Anthropic, and extensible adapters
 - **📊 Debug Tools**: Context building visualization and monitoring
@@ -49,24 +52,10 @@ cm.observe(user_input, response)
 - **Multi-Session Persistence**: Context continuity across sessions
 - **Resource-Constrained Environments**: Configurable memory and processing limits
 
-## 📦 Installation
-
-```bash
-pip install context-manager
-```
-
-Or install from source:
-
-```bash
-git clone https://github.com/contextmanager/context-manager.git
-cd context-manager
-pip install -e .
-```
-
-## 🔧 Quick Configuration
+## 🔧 Basic Configuration
 
 ```python
-from context_manager import Config, ContextManager
+from artiik import Config, ContextManager
 
 # Custom configuration
 config = Config(
@@ -87,12 +76,12 @@ config = Config(
 cm = ContextManager(config)
 ```
 
-## 🚀 Quick Examples
+## 🚀 Examples
 
 ### Basic Agent Integration
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 import openai
 
 cm = ContextManager()
@@ -110,41 +99,10 @@ def simple_agent(user_input: str) -> str:
     return assistant_response
 ```
 
-### Tool-Using Agent
-
-```python
-from context_manager import ContextManager
-from context_manager.llm.adapters import create_llm_adapter
-
-class ToolAgent:
-    def __init__(self):
-        self.cm = ContextManager()
-        self.llm = create_llm_adapter("openai", api_key="your-key")
-        self.tools = {
-            "search": self._search_web,
-            "calculate": self._calculate,
-            "get_weather": self._get_weather
-        }
-    
-    def respond(self, user_input: str) -> str:
-        context = self.cm.build_context(user_input)
-        tool_prompt = f"""
-You have access to these tools:
-- search: Search the web
-- calculate: Perform calculations
-- get_weather: Get weather information
-
-User: {context}
-"""
-        response = self.llm.generate_sync(tool_prompt)
-        self.cm.observe(user_input, response)
-        return response
-```
-
 ### Memory Querying
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 cm = ContextManager()
 
@@ -165,6 +123,27 @@ for text, score in results:
     print(f"Score {score:.2f}: {text}")
 ```
 
+### Indexing Your Data
+
+```python
+from artiik import ContextManager
+
+cm = ContextManager()
+
+# Ingest a single file
+chunks = cm.ingest_file("docs/README.md", importance=0.8)
+print(f"Ingested chunks: {chunks}")
+
+# Ingest a directory
+total = cm.ingest_directory(
+    "./my_repo",
+    file_types=[".py", ".md"],
+    recursive=True,
+    importance=0.7,
+)
+print(f"Total chunks ingested: {total}")
+```
+
 ## 🔍 Understanding the Components
 
 ### Memory Types
@@ -175,7 +154,7 @@ for text, score in results:
 - Fast access for immediate context
 
 **Long-Term Memory (LTM):**
-- Vector-based semantic storage
+- Vector-based semantic storage using FAISS
 - Hierarchical summaries
 - Persistent across sessions
 
@@ -192,7 +171,7 @@ for text, score in results:
 ### Memory Configuration
 
 ```python
-from context_manager import MemoryConfig
+from artiik import MemoryConfig
 
 memory_config = MemoryConfig(
     stm_capacity=8000,              # Max tokens in short-term memory
@@ -207,7 +186,7 @@ memory_config = MemoryConfig(
 ### LLM Configuration
 
 ```python
-from context_manager import LLMConfig
+from artiik import LLMConfig
 
 llm_config = LLMConfig(
     provider="openai",              # "openai" or "anthropic"
@@ -215,19 +194,6 @@ llm_config = LLMConfig(
     api_key="your-api-key",        # API key
     max_tokens=1000,               # Response token limit
     temperature=0.7,               # Creativity (0.0-1.0)
-)
-```
-
-### Vector Store Configuration
-
-```python
-from context_manager import VectorStoreConfig
-
-vector_config = VectorStoreConfig(
-    provider="faiss",              # Vector database provider
-    dimension=384,                 # Embedding dimension
-    index_type="HNSW",            # "HNSW" or "Flat"
-    metric="cosine",               # Similarity metric
 )
 ```
 
@@ -262,42 +228,23 @@ print(f"Final tokens: {debug_info['final_context_tokens']}")
 
 ### 1. API Key Issues
 
-```python
-# Error: Missing API key
-# Solution: Set environment variable
+```bash
+# Set environment variable
 export OPENAI_API_KEY="your-key"
 ```
 
 ### 2. Model Download Issues
 
-```python
-# Error: Failed to load embedding model
-# Solution: Check internet connection and disk space
-# The model (~90MB) will be downloaded on first use
-```
+The embedding model (~90MB) will be downloaded on first use. Ensure you have internet connection and sufficient disk space.
 
 ### 3. Memory Issues
 
 ```python
-# Error: Out of memory
-# Solution: Reduce configuration limits
+# Reduce configuration limits for resource-constrained environments
 config = Config(
     memory=MemoryConfig(
         stm_capacity=4000,  # Reduce from 8000
         prompt_token_budget=6000,  # Reduce from 12000
-    )
-)
-```
-
-### 4. Performance Issues
-
-```python
-# Slow context building
-# Solution: Adjust configuration
-config = Config(
-    memory=MemoryConfig(
-        recent_k=3,        # Reduce from 5
-        ltm_hits_k=5,      # Reduce from 7
     )
 )
 ```
@@ -315,9 +262,6 @@ pytest
 
 # Run with coverage
 pytest --cov=context_manager
-
-# Run specific tests
-pytest tests/test_context_manager.py
 ```
 
 ## 📈 Performance
@@ -329,23 +273,6 @@ pytest tests/test_context_manager.py
 - **Summarization**: ~2s for 2000 token chunks
 - **Memory Usage**: ~90MB for default configuration
 
-### Optimization
-
-```python
-# Fast configuration
-config = Config(
-    memory=MemoryConfig(
-        recent_k=3,        # Fewer recent turns
-        ltm_hits_k=5,      # Fewer LTM results
-        chunk_size=1000,   # Smaller chunks
-    ),
-    llm=LLMConfig(
-        model="gpt-3.5-turbo",  # Faster model
-        max_tokens=500,          # Shorter responses
-    )
-)
-```
-
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](docs/contributing.md) for details.
@@ -354,8 +281,8 @@ We welcome contributions! Please see our [Contributing Guide](docs/contributing.
 
 ```bash
 # Clone the repository
-git clone https://github.com/contextmanager/context-manager.git
-cd context-manager
+git clone https://github.com/BoualamHamza/Context-Manager.git
+cd Context-Manager
 
 # Create virtual environment
 python -m venv venv
@@ -373,14 +300,13 @@ pytest
 
 ## 📄 License
 
-ContextManager is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+ContextManager is licensed under the MIT License. See [LICENSE](LICENSE.md) for details.
 
 ## 🆘 Support
 
 - **Documentation**: [docs/index.md](docs/index.md)
-- **Issues**: [GitHub Issues](https://github.com/contextmanager/context-manager/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/contextmanager/context-manager/discussions)
-- **Email**: support@contextmanager.ai
+- **Issues**: [GitHub Issues](https://github.com/BoualamHamza/Context-Manager/issues)
+- **Email**: boualamhamza@outlook.fr
 
 ## 🙏 Acknowledgments
 
