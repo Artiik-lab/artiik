@@ -7,7 +7,7 @@ Welcome to the comprehensive documentation for ContextManager - a modular, plug-
 Get up and running in minutes:
 
 ```python
-from context_manager import ContextManager
+from artiik import ContextManager
 
 # Initialize with default settings
 cm = ContextManager()
@@ -103,7 +103,8 @@ cm.observe(user_input, response)
 - **🔧 Drop-in Integration**: Works with existing agents without architecture changes
 - **🧠 Intelligent Memory**: Automatic short-term and long-term memory management
 - **📝 Hierarchical Summarization**: Multi-level conversation summarization
-- **🔍 Semantic Search**: Vector-based memory retrieval
+- **🔍 Semantic Search**: Vector-based memory retrieval with FAISS
+- **📥 External Indexing**: Ingest files and directories into long-term memory
 - **💰 Token Optimization**: Smart context assembly within budget constraints
 - **🔄 Multi-LLM Support**: OpenAI, Anthropic, and extensible adapters
 - **📊 Debug Tools**: Context building visualization and monitoring
@@ -121,21 +122,21 @@ cm.observe(user_input, response)
 ## 📦 Installation
 
 ```bash
-pip install context-manager
+pip install artiik
 ```
 
 Or install from source:
 
 ```bash
-git clone https://github.com/contextmanager/context-manager.git
-cd context-manager
+git clone https://github.com/BoualamHamza/Context-Manager.git
+cd Context-Manager
 pip install -e .
 ```
 
 ## 🔧 Quick Configuration
 
 ```python
-from context_manager import Config, ContextManager
+from artiik import Config, ContextManager
 
 # Custom configuration
 config = Config(
@@ -156,84 +157,6 @@ config = Config(
 cm = ContextManager(config)
 ```
 
-## 🚀 Quick Examples
-
-### Basic Agent Integration
-
-```python
-from context_manager import ContextManager
-import openai
-
-cm = ContextManager()
-openai.api_key = "your-api-key"
-
-def simple_agent(user_input: str) -> str:
-    context = cm.build_context(user_input)
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": context}],
-        max_tokens=500
-    )
-    assistant_response = response.choices[0].message.content
-    cm.observe(user_input, assistant_response)
-    return assistant_response
-```
-
-### Tool-Using Agent
-
-```python
-from context_manager import ContextManager
-from context_manager.llm.adapters import create_llm_adapter
-
-class ToolAgent:
-    def __init__(self):
-        self.cm = ContextManager()
-        self.llm = create_llm_adapter("openai", api_key="your-key")
-        self.tools = {
-            "search": self._search_web,
-            "calculate": self._calculate,
-            "get_weather": self._get_weather
-        }
-    
-    def respond(self, user_input: str) -> str:
-        context = self.cm.build_context(user_input)
-        tool_prompt = f"""
-You have access to these tools:
-- search: Search the web
-- calculate: Perform calculations
-- get_weather: Get weather information
-
-User: {context}
-"""
-        response = self.llm.generate_sync(tool_prompt)
-        self.cm.observe(user_input, response)
-        return response
-```
-
-### Memory Querying
-
-```python
-from context_manager import ContextManager
-
-cm = ContextManager()
-
-# Add conversation history
-conversation = [
-    ("I'm planning a trip to Japan", "That sounds exciting!"),
-    ("I want to visit Tokyo and Kyoto", "Great choices!"),
-    ("What's the best time to visit?", "Spring for cherry blossoms!"),
-    ("How much should I budget?", "Around $200-300 per day.")
-]
-
-for user_input, response in conversation:
-    cm.observe(user_input, response)
-
-# Query memory
-results = cm.query_memory("Japan budget", k=3)
-for text, score in results:
-    print(f"Score {score:.2f}: {text}")
-```
-
 ## 🔍 Understanding the Components
 
 ### Memory Types
@@ -244,7 +167,7 @@ for text, score in results:
 - Fast access for immediate context
 
 **Long-Term Memory (LTM):**
-- Vector-based semantic storage
+- Vector-based semantic storage using FAISS
 - Hierarchical summaries
 - Persistent across sessions
 
@@ -275,7 +198,7 @@ config = Config(
 ### Memory Configuration
 
 ```python
-from context_manager import MemoryConfig
+from artiik import MemoryConfig
 
 memory_config = MemoryConfig(
     stm_capacity=8000,              # Max tokens in short-term memory
@@ -290,7 +213,7 @@ memory_config = MemoryConfig(
 ### LLM Configuration
 
 ```python
-from context_manager import LLMConfig
+from artiik import LLMConfig
 
 llm_config = LLMConfig(
     provider="openai",              # "openai" or "anthropic"
@@ -304,7 +227,7 @@ llm_config = LLMConfig(
 ### Vector Store Configuration
 
 ```python
-from context_manager import VectorStoreConfig
+from artiik import VectorStoreConfig
 
 vector_config = VectorStoreConfig(
     provider="faiss",              # Vector database provider
@@ -345,25 +268,19 @@ print(f"Final tokens: {debug_info['final_context_tokens']}")
 
 ### 1. API Key Issues
 
-```python
-# Error: Missing API key
-# Solution: Set environment variable
+```bash
+# Set environment variable
 export OPENAI_API_KEY="your-key"
 ```
 
 ### 2. Model Download Issues
 
-```python
-# Error: Failed to load embedding model
-# Solution: Check internet connection and disk space
-# The model (~90MB) will be downloaded on first use
-```
+The embedding model (~90MB) will be downloaded on first use. Ensure you have internet connection and sufficient disk space.
 
 ### 3. Memory Issues
 
 ```python
-# Error: Out of memory
-# Solution: Reduce configuration limits
+# Reduce configuration limits for resource-constrained environments
 config = Config(
     memory=MemoryConfig(
         stm_capacity=4000,  # Reduce from 8000
@@ -375,8 +292,7 @@ config = Config(
 ### 4. Performance Issues
 
 ```python
-# Slow context building
-# Solution: Adjust configuration
+# Slow context building - adjust configuration
 config = Config(
     memory=MemoryConfig(
         recent_k=3,        # Reduce from 5
@@ -401,14 +317,13 @@ We welcome contributions! Please see our [Contributing Guide](./contributing.md)
 
 ## 📄 License
 
-ContextManager is licensed under the MIT License. See [LICENSE](../LICENSE) for details.
+ContextManager is licensed under the MIT License. See [LICENSE](../LICENSE.md) for details.
 
 ## 🆘 Support
 
 - **Documentation**: This site
-- **Issues**: [GitHub Issues](https://github.com/contextmanager/context-manager/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/contextmanager/context-manager/discussions)
-- **Email**: support@contextmanager.ai
+- **Issues**: [GitHub Issues](https://github.com/BoualamHamza/Context-Manager/issues)
+- **Email**: boualamhamza@outlook.fr
 
 ---
 

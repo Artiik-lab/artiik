@@ -13,15 +13,15 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="context-manager",
-    version="0.1.0",
-    author="ContextManager Team",
-    author_email="team@contextmanager.ai",
-    description="A modular, plug-and-play memory and context management layer for AI agents",
+    name="artiik",
+    version="0.1.1",
+    author="Boualam Hamza",
+    author_email="boualamhamza@outlook.fr",
+    description="A modular, plug-and-play memory and context management layer for AI agents made by Artiik.com",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/contextmanager/context-manager",
-    packages=find_packages(),
+    url="https://github.com/BoualamHamza/Context-Manager.git",
+    packages=find_packages(include=["context_manager*", "artiik*"]),
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -48,7 +48,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "context-manager-demo=context_manager.examples.agent_example:demo_agent",
+            "artiik-demo=context_manager.examples.agent_example:demo_agent",
         ],
     },
     include_package_data=True,
