@@ -9,8 +9,22 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 # Read requirements
-with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+try:
+    with open("requirements.txt", "r", encoding="utf-8") as fh:
+        requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+except FileNotFoundError:
+    # Fallback requirements if requirements.txt is not available
+    requirements = [
+        "openai>=1.0.0",
+        "anthropic>=0.7.0", 
+        "faiss-cpu>=1.7.4",
+        "numpy>=1.24.0",
+        "pydantic>=2.0.0",
+        "sentence-transformers>=2.2.0",
+        "python-dotenv>=1.0.0",
+        "tiktoken>=0.5.0",
+        "loguru>=0.7.0",
+    ]
 
 setup(
     name="artiik",
@@ -22,10 +36,10 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/Artiik-lab/artiik",
     packages=find_packages(include=["context_manager*", "artiik*"]),
+    license="MIT",
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
