@@ -15,7 +15,7 @@ from context_manager.memory.long_term import LongTermMemory
 try:
     from context_manager import __version__  # type: ignore
 except Exception:
-    __version__ = "0.0.0"
+    __version__ = "0.1.0"
 
 __all__ = [
     "ContextManager",

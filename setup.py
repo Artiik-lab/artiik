@@ -14,13 +14,13 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="artiik",
-    version="0.1.1",
+    version="0.1.0",
     author="Boualam Hamza",
     author_email="boualamhamza@outlook.fr",
     description="A modular, plug-and-play memory and context management layer for AI agents made by Artiik.com",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/BoualamHamza/Context-Manager.git",
+    url="https://github.com/Artiik-lab/artiik",
     packages=find_packages(include=["context_manager*", "artiik*"]),
     classifiers=[
         "Development Status :: 3 - Alpha",
