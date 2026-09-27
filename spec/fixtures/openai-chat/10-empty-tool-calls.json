@@ -1,0 +1,14 @@
+{
+  "description": "An empty tool_calls list, kept as sent.",
+  "format": "openai-chat",
+  "covers": [
+    "message-extra"
+  ],
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "No tools needed.",
+      "tool_calls": []
+    }
+  ]
+}

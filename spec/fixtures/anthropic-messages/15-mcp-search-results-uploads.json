@@ -1,0 +1,66 @@
+{
+  "description": "MCP tool blocks, search results and a container upload, kept whole.",
+  "format": "anthropic-messages",
+  "covers": [
+    "opaque-blocks",
+    "mcp"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "search_result",
+          "source": "https://docs.example.com/a",
+          "title": "A",
+          "content": [
+            {
+              "type": "text",
+              "text": "Retries use exponential backoff."
+            }
+          ],
+          "citations": {
+            "enabled": true
+          }
+        },
+        {
+          "type": "container_upload",
+          "file_id": "file_01XYZ"
+        },
+        {
+          "type": "text",
+          "text": "Use these."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "mcp_tool_use",
+          "id": "mcptoolu_01",
+          "name": "echo",
+          "server_name": "example",
+          "input": {
+            "text": "hi"
+          }
+        },
+        {
+          "type": "mcp_tool_result",
+          "tool_use_id": "mcptoolu_01",
+          "is_error": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "hi"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "The server echoed hi."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "description": "An assistant message with text and a tool call.",
+  "format": "openai-chat",
+  "covers": [
+    "tool-calls"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Book a table for two."
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check availability.",
+      "tool_calls": [
+        {
+          "id": "call_3",
+          "type": "function",
+          "function": {
+            "name": "check_availability",
+            "arguments": "{\"party_size\":2}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_3",
+      "content": "7pm is free"
+    }
+  ]
+}

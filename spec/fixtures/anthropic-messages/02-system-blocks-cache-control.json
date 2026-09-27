@@ -1,0 +1,39 @@
+{
+  "description": "System prompt as text blocks with cache breakpoints, including a 1-hour TTL.",
+  "format": "anthropic-messages",
+  "covers": [
+    "system-blocks",
+    "cache-control"
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a support agent for Acme.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    },
+    {
+      "type": "text",
+      "text": "Never promise refunds above $500.",
+      "cache_control": {
+        "type": "ephemeral",
+        "ttl": "1h"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Order 1234 arrived broken.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ]
+}

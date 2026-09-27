@@ -1,0 +1,33 @@
+{
+  "description": "Explicit message items, including an output message with annotations and logprobs.",
+  "format": "openai-responses",
+  "covers": [
+    "message-items"
+  ],
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What's 2+2?"
+        }
+      ]
+    },
+    {
+      "id": "msg_67cb1",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "4",
+          "annotations": [],
+          "logprobs": []
+        }
+      ]
+    }
+  ]
+}

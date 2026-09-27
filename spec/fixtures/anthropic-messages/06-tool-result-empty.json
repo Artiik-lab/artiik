@@ -1,0 +1,45 @@
+{
+  "description": "Tool results with no content key and with an empty content list.",
+  "format": "anthropic-messages",
+  "covers": [
+    "tool-result-empty"
+  ],
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_03",
+          "name": "touch",
+          "input": {
+            "path": "a.txt"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_04",
+          "name": "touch",
+          "input": {
+            "path": "b.txt"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_03",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_04",
+          "content": []
+        }
+      ]
+    }
+  ]
+}

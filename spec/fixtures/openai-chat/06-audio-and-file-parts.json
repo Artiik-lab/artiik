@@ -1,0 +1,32 @@
+{
+  "description": "An audio part kept whole, and a file part.",
+  "format": "openai-chat",
+  "covers": [
+    "opaque-blocks",
+    "documents"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_audio",
+          "input_audio": {
+            "data": "UklGRiQAAABXQVZF",
+            "format": "wav"
+          }
+        },
+        {
+          "type": "file",
+          "file": {
+            "file_id": "file-xyz"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Transcribe and compare."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "System, user and assistant messages with string content.",
+  "format": "openai-chat",
+  "covers": [
+    "text-shorthand"
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are helpful."
+    },
+    {
+      "role": "user",
+      "content": "Hi"
+    },
+    {
+      "role": "assistant",
+      "content": "Hello!"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "description": "Encrypted reasoning passed back unchanged.",
+  "format": "anthropic-messages",
+  "covers": [
+    "redacted-thinking"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Help me plan."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "redacted_thinking",
+          "data": "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpP"
+        },
+        {
+          "type": "text",
+          "text": "Here is a plan."
+        }
+      ]
+    }
+  ]
+}

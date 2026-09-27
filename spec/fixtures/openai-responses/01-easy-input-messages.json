@@ -1,0 +1,21 @@
+{
+  "description": "Messages without a type, with string content.",
+  "format": "openai-responses",
+  "covers": [
+    "text-shorthand"
+  ],
+  "input": [
+    {
+      "role": "user",
+      "content": "Hello"
+    },
+    {
+      "role": "assistant",
+      "content": "Hi! How can I help?"
+    },
+    {
+      "role": "user",
+      "content": "Summarize our chat."
+    }
+  ]
+}

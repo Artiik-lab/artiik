@@ -1,0 +1,60 @@
+{
+  "description": "Signed thinking blocks around a tool call.",
+  "format": "anthropic-messages",
+  "covers": [
+    "thinking",
+    "tool-calls"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Is 2027 a prime year?"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "I should check divisibility up to 45.",
+          "signature": "EqQBCkYIBRgCKkBjSGVsbG8gd29ybGQ="
+        },
+        {
+          "type": "text",
+          "text": "Let me check."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_05",
+          "name": "is_prime",
+          "input": {
+            "n": 2027
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_05",
+          "content": "true"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "The tool confirms it.",
+          "signature": "EpABCkYIBRgCKkDmb2xsb3ctdXA="
+        },
+        {
+          "type": "text",
+          "text": "Yes, 2027 is prime."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "description": "An encrypted reasoning item before a function call.",
+  "format": "openai-responses",
+  "covers": [
+    "reasoning",
+    "opaque-items"
+  ],
+  "input": [
+    {
+      "role": "user",
+      "content": "Plan a trip to Rome."
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_68a1",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Considering flights first."
+        }
+      ],
+      "encrypted_content": "gAAAAABoZ2VuZXJhdGVkLXJlYXNvbmluZw=="
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_C",
+      "name": "search_flights",
+      "arguments": "{\"from\":\"PAR\",\"to\":\"ROM\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_C",
+      "output": "3 flights found"
+    }
+  ]
+}

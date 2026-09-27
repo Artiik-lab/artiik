@@ -1,0 +1,26 @@
+{
+  "description": "Developer and system messages.",
+  "format": "openai-responses",
+  "covers": [
+    "developer-role"
+  ],
+  "input": [
+    {
+      "role": "developer",
+      "content": "Answer in French."
+    },
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Be concise."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Hello"
+    }
+  ]
+}

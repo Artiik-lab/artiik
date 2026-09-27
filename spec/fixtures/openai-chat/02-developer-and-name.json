@@ -1,0 +1,19 @@
+{
+  "description": "A developer message and a named user.",
+  "format": "openai-chat",
+  "covers": [
+    "developer-role",
+    "message-extra"
+  ],
+  "messages": [
+    {
+      "role": "developer",
+      "content": "Answer in French."
+    },
+    {
+      "role": "user",
+      "content": "Hi",
+      "name": "alice"
+    }
+  ]
+}

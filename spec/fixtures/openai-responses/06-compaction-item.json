@@ -1,0 +1,18 @@
+{
+  "description": "An opaque compaction item followed by a new turn.",
+  "format": "openai-responses",
+  "covers": [
+    "openai-compaction"
+  ],
+  "input": [
+    {
+      "type": "compaction",
+      "id": "cmp_68b2",
+      "encrypted_content": "gAAAAABoY29tcGFjdGVkLXN0YXRl"
+    },
+    {
+      "role": "user",
+      "content": "Continue from where we left off."
+    }
+  ]
+}

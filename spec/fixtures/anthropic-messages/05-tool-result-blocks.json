@@ -1,0 +1,44 @@
+{
+  "description": "A tool result made of text and an image.",
+  "format": "anthropic-messages",
+  "covers": [
+    "tool-result-blocks",
+    "images"
+  ],
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_02",
+          "name": "screenshot",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_02",
+          "content": [
+            {
+              "type": "text",
+              "text": "Screenshot of the login page."
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgo="
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

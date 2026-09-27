@@ -1,0 +1,26 @@
+{
+  "description": "Text and image content parts.",
+  "format": "openai-chat",
+  "covers": [
+    "images",
+    "content-parts"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe this."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://example.com/a.png",
+            "detail": "low"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "A function call whose arguments aren't valid JSON, kept verbatim.",
+  "format": "openai-responses",
+  "covers": [
+    "raw-arguments",
+    "invalid-arguments"
+  ],
+  "input": [
+    {
+      "type": "function_call",
+      "call_id": "call_F",
+      "name": "broken",
+      "arguments": "{\"city\": \"Paris\""
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_F",
+      "output": "error: invalid arguments"
+    }
+  ]
+}
