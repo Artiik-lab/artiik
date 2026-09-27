@@ -1,0 +1,27 @@
+{
+  "description": "A signed compaction block as the first message, then kept turns.",
+  "format": "anthropic-messages",
+  "covers": [
+    "anthropic-compaction"
+  ],
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "compaction",
+          "content": "Summary of the conversation: the user is designing a recipe app. Entities agreed: Recipe, Ingredient, Step, RecipeIngredient.",
+          "signature": "EuYBCkQYAiJAc29tZSBzaWduYXR1cmUgYnl0ZXM="
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "For Recipe, use title, description, servings, prep_minutes and cook_minutes."
+    },
+    {
+      "role": "user",
+      "content": "Now do the same for Ingredient."
+    }
+  ]
+}

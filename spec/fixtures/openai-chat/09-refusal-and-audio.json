@@ -1,0 +1,35 @@
+{
+  "description": "Assistant fields artiik doesn't model: refusal, audio, and a refusal part.",
+  "format": "openai-chat",
+  "covers": [
+    "message-extra",
+    "refusal"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Say hi out loud."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "refusal": null,
+      "audio": {
+        "id": "audio_abc123"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Now refuse something."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "refusal",
+          "refusal": "I can't."
+        }
+      ]
+    }
+  ]
+}

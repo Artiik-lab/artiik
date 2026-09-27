@@ -1,0 +1,44 @@
+{
+  "description": "Server tool use and its results, kept whole.",
+  "format": "anthropic-messages",
+  "covers": [
+    "opaque-blocks",
+    "server-tools"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Find the artiik repository."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "server_tool_use",
+          "id": "srvtoolu_01",
+          "name": "web_search",
+          "input": {
+            "query": "artiik"
+          }
+        },
+        {
+          "type": "web_search_tool_result",
+          "tool_use_id": "srvtoolu_01",
+          "content": [
+            {
+              "type": "web_search_result",
+              "url": "https://example.com",
+              "title": "Example",
+              "encrypted_content": "EqgfCioIARgBIiQ3YTAwMDAwMDA=",
+              "page_age": "April 30, 2026"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "text": "Found it."
+        }
+      ]
+    }
+  ]
+}

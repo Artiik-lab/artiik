@@ -1,0 +1,61 @@
+{
+  "description": "Two tool calls in one turn, answered together; one result is an error.",
+  "format": "anthropic-messages",
+  "covers": [
+    "parallel-tool-calls",
+    "tool-error"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Weather in Paris and Rome?"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Checking both."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01A",
+          "name": "get_weather",
+          "input": {
+            "city": "Paris"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01B",
+          "name": "get_weather",
+          "input": {
+            "city": "Rome",
+            "units": "metric"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A",
+          "content": "18°C, cloudy"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01B",
+          "content": [
+            {
+              "type": "text",
+              "text": "Service unavailable"
+            }
+          ],
+          "is_error": true
+        }
+      ]
+    }
+  ]
+}

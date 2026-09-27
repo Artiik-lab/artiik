@@ -1,0 +1,40 @@
+{
+  "description": "Two function calls and their outputs; the arguments' spacing is kept.",
+  "format": "openai-responses",
+  "covers": [
+    "parallel-tool-calls",
+    "raw-arguments"
+  ],
+  "input": [
+    {
+      "role": "user",
+      "content": "Weather in Paris and Rome?"
+    },
+    {
+      "type": "function_call",
+      "id": "fc_1",
+      "call_id": "call_A",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "id": "fc_2",
+      "call_id": "call_B",
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Rome\"}",
+      "status": "completed"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_A",
+      "output": "18°C"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_B",
+      "output": "21°C"
+    }
+  ]
+}

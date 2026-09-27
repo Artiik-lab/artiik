@@ -1,0 +1,34 @@
+{
+  "description": "Images by URL and file id, and an inline file.",
+  "format": "openai-responses",
+  "covers": [
+    "images",
+    "documents"
+  ],
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "What's in these?"
+        },
+        {
+          "type": "input_image",
+          "image_url": "https://example.com/a.png",
+          "detail": "high"
+        },
+        {
+          "type": "input_image",
+          "file_id": "file-abc123",
+          "detail": "auto"
+        },
+        {
+          "type": "input_file",
+          "filename": "report.pdf",
+          "file_data": "data:application/pdf;base64,JVBERi0x"
+        }
+      ]
+    }
+  ]
+}

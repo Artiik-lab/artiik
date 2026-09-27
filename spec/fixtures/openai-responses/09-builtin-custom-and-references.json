@@ -1,0 +1,35 @@
+{
+  "description": "Built-in tool calls, custom tool calls and item references, kept whole.",
+  "format": "openai-responses",
+  "covers": [
+    "opaque-items",
+    "future-types"
+  ],
+  "input": [
+    {
+      "type": "web_search_call",
+      "id": "ws_1",
+      "status": "completed",
+      "action": {
+        "type": "search",
+        "query": "artiik"
+      }
+    },
+    {
+      "type": "custom_tool_call",
+      "id": "ctc_1",
+      "call_id": "call_E",
+      "name": "run_sql",
+      "input": "SELECT 1"
+    },
+    {
+      "type": "custom_tool_call_output",
+      "call_id": "call_E",
+      "output": "1"
+    },
+    {
+      "type": "item_reference",
+      "id": "msg_prev"
+    }
+  ]
+}

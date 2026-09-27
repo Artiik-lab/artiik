@@ -1,0 +1,14 @@
+{
+  "description": "System prompt as a plain string.",
+  "format": "anthropic-messages",
+  "covers": [
+    "system-string"
+  ],
+  "system": "You are terse.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hi"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "Plain string content in both directions.",
+  "format": "anthropic-messages",
+  "covers": [
+    "text-shorthand"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "What's the capital of France?"
+    },
+    {
+      "role": "assistant",
+      "content": "Paris."
+    },
+    {
+      "role": "user",
+      "content": "And of Italy?"
+    }
+  ]
+}

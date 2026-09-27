@@ -1,0 +1,51 @@
+{
+  "description": "A PDF document with citations enabled, and a cited answer.",
+  "format": "anthropic-messages",
+  "covers": [
+    "documents",
+    "citations"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "document",
+          "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "JVBERi0xLjQK"
+          },
+          "title": "Q3 report",
+          "context": "Internal",
+          "citations": {
+            "enabled": true
+          }
+        },
+        {
+          "type": "text",
+          "text": "Summarize revenue."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Revenue grew 12%.",
+          "citations": [
+            {
+              "type": "page_location",
+              "cited_text": "Revenue grew 12%",
+              "document_index": 0,
+              "document_title": "Q3 report",
+              "start_page_number": 2,
+              "end_page_number": 3
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

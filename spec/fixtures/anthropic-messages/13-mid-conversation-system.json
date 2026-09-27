@@ -1,0 +1,25 @@
+{
+  "description": "A system message inside the conversation.",
+  "format": "anthropic-messages",
+  "covers": [
+    "mid-conversation-system"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Plan the database migration."
+    },
+    {
+      "role": "assistant",
+      "content": "Step 1: back up the database."
+    },
+    {
+      "role": "user",
+      "content": "Go on."
+    },
+    {
+      "role": "system",
+      "content": "Never run migrations against production."
+    }
+  ]
+}

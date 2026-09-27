@@ -1,0 +1,38 @@
+{
+  "description": "A block type that doesn't exist yet, with nested data and nulls.",
+  "format": "anthropic-messages",
+  "covers": [
+    "opaque-blocks",
+    "future-types"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "hologram_2027",
+          "payload": {
+            "frames": [
+              1,
+              2,
+              3
+            ],
+            "fps": 29.97
+          },
+          "nested": {
+            "deep": [
+              {
+                "x": null
+              },
+              true
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "text": "What is this?"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "description": "Legacy function_call and function-role messages, kept whole.",
+  "format": "openai-chat",
+  "covers": [
+    "legacy-function-call",
+    "opaque-items"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Weather?"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "function_call": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+      }
+    },
+    {
+      "role": "function",
+      "name": "get_weather",
+      "content": "18°C"
+    }
+  ]
+}
