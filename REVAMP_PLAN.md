@@ -1,6 +1,6 @@
 # artiik revamp plan
 
-*Drafted 2026-09-27. Status: **approved 2026-09-27**. The decisions are in §11, and the work is tracked as GitHub issues (§12).*
+*Drafted 2026-09-27. Status: **approved 2026-09-27**. The decisions are in §11, and the work is tracked as GitHub issues under the [roadmap, #2](https://github.com/Artiik-lab/artiik/issues/2) (§12).*
 
 ## 0. Summary
 
@@ -496,6 +496,8 @@ The versions run 0.2.x alphas from M1 to 1.0 at M6. Nobody depends on 0.1.0 (abo
 ---
 
 ## 12. How the work is tracked on GitHub
+
+**Roadmap:** [#2](https://github.com/Artiik-lab/artiik/issues/2) · **Milestones:** #3 (M0) to #9 (M6) · **Tasks:** #10 to #51.
 
 - **One roadmap issue** holds this plan's summary. Its sub-issues are the milestones.
 - **One epic per milestone** (M0–M6): type *Feature*, label `epic`, with the org's *Start date*, *Target date*, *Priority* and *Effort* fields set, so a GitHub Project can draw them on a roadmap.
