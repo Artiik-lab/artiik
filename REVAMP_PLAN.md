@@ -1,6 +1,6 @@
 # artiik revamp plan
 
-*Drafted 2026-09-27. Status: proposal, waiting on the decisions in §11.*
+*Drafted 2026-09-27. Status: **approved 2026-09-27**. The decisions are in §11, and the work is tracked as GitHub issues (§12).*
 
 ## 0. Summary
 
@@ -14,6 +14,8 @@
 
 > add context management to my agent
 ```
+
+Or, without the plugin, add just the skill: `npx skills add artiik-lab/artiik`, or copy its folder into `.claude/skills/`. That works in any coding agent that supports Agent Skills.
 
 Claude Code then:
 
@@ -30,16 +32,16 @@ The builder doesn't read docs or wire anything by hand.
 | # | Deliverable | What it is |
 |---|---|---|
 | 1 | **artiik runtime** | A small library with zero required dependencies (Python first, TypeScript in M6). It manages the context of the agent at run time. |
-| 2 | **artiik Claude Code plugin + skill** | The main entry point. The skill teaches the coding agent to integrate, audit and tune artiik on any supported stack. The same skill works as a standalone Agent Skill in other coding agents. |
+| 2 | **The artiik skill, packaged as a Claude Code plugin** | The main entry point. The skill teaches the coding agent to integrate, audit and tune artiik on any supported stack. **It stands alone:** add just the skill to Claude Code, Codex or any agent that supports Agent Skills, and everything works. The plugin adds one-command install and updates in Claude Code, plus the eval suite. |
 | 3 | **artiik-bench** | Two benchmarks. **Integration:** does the plugin wire artiik in correctly? **Context quality:** does the wired agent remember what it must, and at what cost? |
 
-**How:** a rewrite, not a patch. We tag `v0.1.0` for history, then replace the package. Roughly 9–11 weeks to 1.0 for one developer working with Claude Code (§7).
+**How:** a rewrite, not a patch. The existing `v0.1.0` and `v0.1.1` tags keep the old code reachable, and we replace the package. Roughly 11 weeks to 1.0 for one developer working with Claude Code, aiming at mid-December 2026 (§7).
 
 ---
 
 ## 1. What this plan takes from the analysis, and what it sets aside
 
-**Taken as input** (the verified facts in ANALYSIS.md §2–§3):
+**Taken as input** (the verified facts in §2–§3 of the strategic analysis dated 2026-09-27, which was shared separately and isn't in the repo):
 
 - **The v0.1 code is broken.** Its defects include summarize-and-offload that can never run, `-1` FAISS hits, corrupted persistence after load→delete, and scope filtering that runs after top-k. Its README examples don't run either.
 - **Its assumptions are outdated.** It assumes string prompts, `(user, assistant)` text pairs, GPT-4 tiktoken for every model, and 2024 model defaults. It also pulls in a ~60-package torch/CUDA install.
@@ -206,11 +208,17 @@ The steps run in order, cheapest first. Each strategy has a native implementatio
 
 - **Profiles** set defaults: `assistant`, `long-running-agent`, `research`, `small-window`.
 - **Configuration** is either in code or in `artiik.toml`, which the skill generates and comments.
-- **Supported Python:** 3.10 and later.
+- **Supported Python:** 3.11 and later. Python 3.10 reaches end of life in October 2026, and 3.11's built-in `tomllib` reads `artiik.toml` without adding a dependency.
 
 ---
 
-## 5. Claude Code plugin and skill
+## 5. The artiik skill and its Claude Code plugin
+
+**Skill first.** The skill is the product, and the plugin is packaging. Adding the skill folder on its own, without the plugin, must be enough for everything to work. So:
+
+- everything the skill uses lives inside its own folder: workflows, per-stack references, scripts and templates;
+- the skill never depends on plugin-only parts such as hooks, subagents or MCP servers;
+- integrate, audit and bench are workflows inside **one** skill, so there's a single thing to add.
 
 ### 5.1 Repo layout
 
@@ -221,8 +229,10 @@ Checked against Claude Code's `plugin validate`.
 plugins/artiik/
   .claude-plugin/plugin.json
   skills/
-    artiik/                            # main skill: integrate + tune
-      SKILL.md
+    artiik/                            # the one skill: self-contained, works without the plugin
+      SKILL.md                         # short router: which workflow, which stack reference
+      workflows/
+        integrate.md  audit.md  bench.md
       references/                      # loaded on demand, one file per stack
         anthropic.md  openai.md  compat-local.md  claude-agent-sdk.md
         openai-agents.md  langgraph.md  pydantic-ai.md  vercel-ai.md
@@ -231,9 +241,6 @@ plugins/artiik/
         detect_stack.py                # stdlib only → JSON (language, SDKs, framework, loop call sites)
         verify_integration.py          # drives the agent with a fake model; checks the invariants
       templates/                       # artiik.toml, test file
-    artiik-audit/SKILL.md              # read-only review of an agent's context handling
-    artiik-bench/SKILL.md              # runs artiik-bench (quick or full) on the builder's agent
-  agents/context-auditor.md            # read-only subagent (Read, Grep, Glob) used by the audit skill
   evals/                               # `claude plugin eval` cases (§6.1)
 python/                                # artiik runtime (PyPI: artiik)
 typescript/                            # @artiik/core (M6)
@@ -247,7 +254,7 @@ Notes from checking this against Claude Code:
 
 - Skills must live under `skills/`, not at the plugin root. A root skill path (`"./"`) collides with `evals/`, and `plugin eval init` refuses to run.
 - The plugin has **no hooks and no MCP server** in v1. That means no always-on cost, nothing to trust beyond small readable scripts, and no network calls.
-- `claude plugin details` reports the always-on token cost. Target: under 300 tokens for all three skill descriptions together.
+- `claude plugin details` reports the always-on token cost. Target: under 150 tokens, since there's one skill description.
 
 ### 5.2 What the main skill does
 
@@ -265,14 +272,15 @@ Notes from checking this against Claude Code:
 
 The skill checks the installed artiik version and reads that version's docs instead of relying on training data. Coding agents writing context code from stale knowledge is the failure this avoids.
 
+The **audit** workflow is the same detection plus a read-only review. It reports findings such as unbounded history, tool results that can be orphaned, cache-busting content in the system prompt and memory without scoping. It changes nothing. The **bench** workflow runs `artiik bench` on the builder's agent, quick or full.
+
 ### 5.3 Distribution
 
-- **Claude Code:**
-  - Install with `/plugin marketplace add artiik-lab/artiik`, then `/plugin install artiik@artiik`.
-  - Tag releases with `claude plugin tag`.
-  - Once the benchmarks are published, submit the plugin to Anthropic's plugin directory.
-- **Other coding agents:** `SKILL.md` follows the Agent Skills standard. Confirm in M2 that `npx skills add artiik-lab/artiik` finds `plugins/artiik/skills/*`. If it doesn't, add a root `skills/` entry that points there.
-- **Codex plugin** packaging comes in M6.
+There are three ways in, and each one must work on its own:
+
+1. **Claude Code plugin:** `/plugin marketplace add artiik-lab/artiik`, then `/plugin install artiik@artiik`. Releases are tagged with `claude plugin tag`. Once the benchmarks are published, the plugin is submitted to Anthropic's plugin directory.
+2. **The skill alone:** `npx skills add artiik-lab/artiik`, or copy the `artiik` skill folder into `.claude/skills/` (project) or `~/.claude/skills/` (user). `SKILL.md` follows the Agent Skills standard. M2 confirms that `npx skills add` finds `plugins/artiik/skills/*`; if it doesn't, a root `skills/` entry points there.
+3. **Codex and other agents:** the same skill folder. Codex is tested and packaged as a Codex plugin at the end, in M6.
 - **CI:** runs `claude plugin validate --strict` and the eval suite in quick mode.
 
 ---
@@ -354,7 +362,7 @@ Each v0.1 defect gets a named regression test.
 5. **artiik default.**
 6. artiik ablations: without pins, without memory, without clearing, and generic compaction instead of native.
 
-**Agent models:** three Claude tiers (small, mid and frontier), one OpenAI model and one local model. Exact model IDs are pinned in `bench/context/config.toml`.
+**Agent models:** three Claude tiers (small, mid and frontier), one small OpenAI model and one local model. Exact model IDs are set in the benchmark config, not hard-coded. §6.3 shows which tier runs which part of the matrix.
 
 **Metrics:** task success, retention and violations, recall accuracy, input tokens, cache hit rate, number of compactions and latency. Billed cost is computed from usage fields times a dated `pricing.toml`, cache reads and writes included. **The headline is cost per successful task, alongside retention.**
 
@@ -370,19 +378,58 @@ Each v0.1 defect gets a named regression test.
 
 **Output:** `bench/results/<date>/report.html` plus a summary table in the README.
 
+### 6.3 Budget: €100 of API spend
+
+**€100 (about $110) is enough for 1.0**, with the design below. The full matrix in §6.2 (every arm × every model × 5 seeds, all on API keys) would cost roughly €450, so we don't run it that way.
+
+List prices on 2026-09-27, in USD per million tokens:
+
+| Model tier | Input | Cache write (5 min) | Cache read | Output |
+|---|---|---|---|---|
+| Claude small (Haiku class) | $1 | $1.25 | $0.10 | $5 |
+| Claude mid (Sonnet class) | $2 | $2.50 | $0.20 | $10 |
+| Claude frontier (Opus class) | $4 | $5 | $0.20 | $20 |
+| OpenAI small | $0.10 | n/a | $0.01 | $0.50 |
+
+**What keeps it inside €100:**
+
+1. **Track A runs on your Claude subscription, not the API.** `claude -p` and `claude plugin eval` run as the logged-in user, so the coding-agent sessions count against your plan's usage limits. On an API key, the ~240 sessions would cost about $170 (≈ $0.70 each at mid-tier prices).
+2. **Scaled-down windows.** Track B compacts at about 32k tokens instead of 150k or more. What survives a compaction doesn't depend on the window's size, and small windows are 5–10× cheaper. One full-size spot check confirms it.
+3. **A tiered matrix.** The cheap models run the whole matrix. The mid tier runs the suites where native compaction matters, and the frontier tier gets one spot check.
+4. **Cache-hostile arms run small.** A naive sliding window changes the prompt prefix on every call, so it can't use the cache and costs 4–5× more per episode. It runs with one seed per suite, which is enough to show that cost.
+5. **Replay and a hard cap.** Re-runs come from the record/replay cache at no cost, and `--max-cost-usd` stops a run before it overspends. The first three episodes of each cell measure the real cost, and the matrix is rescaled if the estimate is off.
+6. **Optional:** the Batch API (50% off) for the final published run, by stepping all episodes in lockstep.
+
+On-demand compaction isn't available on the current small tier. There, the "provider-native" arm uses context editing only, and native compaction is measured on the mid and frontier tiers.
+
+The estimates assume an episode of about 60 model calls, about 20k tokens of context on average, at least 90% cache reads and 2–3 compactions.
+
+| Block | Where it runs | Est. cost |
+|---|---|---|
+| Track A: 8 fixtures × 3 prompts × 2 arms × 5 runs | Claude subscription | $0 (plan limits) |
+| Track A: LLM graders | Claude small | ~$3 |
+| Track B: development and debugging | fake model, replay, OpenAI small | ~$5 |
+| Track B: B1, B3, B5 × 4 arms (naive, native only, artiik, artiik without pins) × 5 seeds = 60 episodes at ~$0.80 | Claude mid | ~$48 |
+| Track B: 6 suites × 3 arms × 3 seeds = 54 episodes at ~$0.30, plus the sliding window at 1 seed per suite | Claude small | ~$26 |
+| Track B: 6 suites × 5 arms (framework-native included) × 5 seeds = 150 episodes | OpenAI small | ~$8 |
+| Track B: frontier spot check, 1 suite × 2 arms × 3 seeds | Claude frontier | ~$7 |
+| B6 small window | local model on your machine | $0 |
+| Reserve for re-runs and surprises | | ~$13 |
+| **Total** | | **≈ $110 ≈ €100** |
+
 ---
 
 ## 7. Roadmap
 
-| Milestone | Scope | Est. |
-|---|---|---|
-| **M0 · Reset** | • Tag `v0.1.0`.<br>• Delete `context_manager/`, `Demos/`, `demo.py`, `serve_docs.py` and the docsify site.<br>• New README that says what's coming.<br>• `python/` with hatchling + uv.<br>• CI: ruff, pytest, pyright, `plugin validate`.<br>• Fix the LICENSE holder.<br>• Retitle issue #1 as "parked". | 2–3 days |
-| **M1 · Core runtime (Python)** | • Message model and converters (Anthropic, OpenAI Responses, Chat Completions).<br>• Budget and guard.<br>• Clearing and offload.<br>• Compaction: native Anthropic, native OpenAI, and generic.<br>• Pins and artifact ledger.<br>• File memory, BM25, and the memory-tool backend.<br>• Traces and `artiik inspect`.<br>• Profiles and `artiik.toml`.<br>• `wrap()` for the Anthropic and OpenAI clients (sync and async).<br>• `artiik.testing` fake clients.<br>• Tier 0 invariant tests. | ~2 weeks |
-| **M2 · Plugin + skill v1** | • Marketplace, plugin, and the main skill with the Anthropic, OpenAI and local recipes.<br>• `detect_stack`, `verify_integration`, the audit skill and its subagent.<br>• First 3 fixtures and eval cases.<br>• Dogfood on 2 real agents. | ~1 week (overlaps the end of M1) |
-| **M3 · Framework adapters** | • Claude Agent SDK (Python), OpenAI Agents SDK, LangChain v1/LangGraph and Pydantic AI.<br>• Each one ships an adapter, a skill reference, a fixture and an eval case. | ~2 weeks |
-| **M4 · Integration benchmark** | • Runner, hidden verifiers and full runs.<br>• Iterate on the skill until the §6.1 targets hold. | ~1 week |
-| **M5 · Context-quality benchmark** | • Suites B1–B6, the arms, runs and report.<br>• Tune the defaults from the results. | ~2 weeks |
-| **M6 · TypeScript, Codex, launch** | • `@artiik/core`, built against the shared `spec/` fixtures.<br>• Vercel AI SDK and Claude Agent SDK (TypeScript) adapters, plus their fixtures.<br>• Codex plugin packaging.<br>• Docs.<br>• Release 1.0 on PyPI, npm and as a plugin tag.<br>• Submit to the plugin directory.<br>• Benchmark write-up. | 2–3 weeks |
+| Milestone | Scope | Est. | Dates |
+|---|---|---|---|
+| **M0 · Reset** | • Keep the `v0.1.0` / `v0.1.1` tags as the legacy reference.<br>• Delete `context_manager/`, `artiik/`, `Demos/`, `demo.py`, `serve_docs.py`, the old tests and the docsify site.<br>• `python/` with hatchling + uv, Python 3.11+.<br>• CI: ruff, pytest, pyright, `plugin validate`.<br>• New README, fixed LICENSE holder, CONTRIBUTING and CLAUDE.md.<br>• Land this plan on `main`; mark issue #1 as parked. | 2–3 days | Sep 28 – Sep 30 |
+| **M1 · Core runtime (Python)** | • Message model and converters (Anthropic, OpenAI Responses, Chat Completions).<br>• Budget and guard.<br>• Clearing and offload.<br>• Compaction: native Anthropic, native OpenAI, and generic.<br>• Pins and artifact ledger.<br>• File memory, BM25, and the memory-tool backend.<br>• Traces and `artiik inspect`.<br>• Profiles and `artiik.toml`.<br>• `wrap()` for the Anthropic and OpenAI clients (sync and async).<br>• `artiik.testing` fake clients.<br>• Tier 0 invariant tests. | ~2 weeks | Oct 1 – Oct 14 |
+| **M2 · Skill + plugin v1** | • The self-contained `artiik` skill with the Anthropic, OpenAI and local recipes, and its integrate, audit and bench workflows.<br>• `detect_stack`, `verify_integration` and vendor mode.<br>• Marketplace and plugin.<br>• All three install paths verified.<br>• First 3 fixtures and eval cases.<br>• Dogfood on 2 real agents. | ~1 week (overlaps the end of M1) | Oct 12 – Oct 21 |
+| **M3 · Framework adapters** | • Claude Agent SDK (Python), OpenAI Agents SDK, LangChain v1/LangGraph and Pydantic AI.<br>• Each one ships an adapter, a skill reference, a fixture and an eval case. | ~2 weeks | Oct 22 – Nov 4 |
+| **M4 · Integration benchmark** | • Runner, hidden verifiers and full runs.<br>• Iterate on the skill until the §6.1 targets hold. | ~1 week | Nov 5 – Nov 11 |
+| **M5 · Context-quality benchmark** | • Suites B1–B6, the arms, runs and report.<br>• Tune the defaults from the results, within the §6.3 budget. | ~2 weeks | Nov 12 – Nov 25 |
+| **M6 · TypeScript, Codex, launch** | • `@artiik/core`, built against the shared `spec/` fixtures.<br>• Vercel AI SDK and Claude Agent SDK (TypeScript) adapters, plus their fixtures.<br>• Codex: test the skill there, add a Codex arm to Track A, package a Codex plugin.<br>• Docs.<br>• Release 1.0 on PyPI, npm and as a plugin tag.<br>• Submit to the plugin directory.<br>• Benchmark write-up. | 2–3 weeks | Nov 26 – Dec 16 |
 
 The versions run 0.2.x alphas from M1 to 1.0 at M6. Nobody depends on 0.1.0 (about 157 non-mirror downloads in six months), so we make a clean break and write a short migration note.
 
@@ -414,10 +461,10 @@ The versions run 0.2.x alphas from M1 to 1.0 at M6. Nobody depends on 0.1.0 (abo
 | Provider APIs move fast. On-demand compaction is a beta dated 2026-09-04. | Provider specifics live in `providers/`, behind capability detection and dated feature flags. A nightly live smoke test runs against each provider, and the skill reads the installed version's docs. |
 | Transparent wrapping (L1) mis-reconciles history | L2 stays the documented default until L1 passes Tier 0 plus fuzzing on history edits. |
 | Skill output varies from run to run | Deterministic scripts handle detection and verification, and the model does the wiring. The eval suite runs in CI, and the skill description is tuned against trigger-rate data from Track A. |
-| Plugin fatigue and trust | No hooks, no MCP server and no network calls. The scripts are small and readable. |
+| Plugin fatigue and trust | One skill, no hooks, no MCP server and no network calls. The scripts are small and readable, and the skill works without the plugin. |
 | Framework churn | Adapters stay thin, and each has a fixture that fails loudly when the framework upgrades. |
 | Native features make parts of artiik redundant | The "native only" benchmark arm, plus the honesty rule in §6.2. |
-| Benchmark spend | Record/replay, quick mode and `--max-cost-usd`. The budget is agreed up front (§11). |
+| Benchmark spend | Capped at €100 (§6.3): Track A on the Claude subscription, record/replay, quick mode and `--max-cost-usd`. |
 | Scope creep | The non-goals list. A new feature ships only with a benchmark suite showing it helps. |
 
 ---
@@ -428,20 +475,30 @@ The versions run 0.2.x alphas from M1 to 1.0 at M6. Nobody depends on 0.1.0 (abo
 - [ ] Track A: ≥ 90% hidden-verifier pass with the plugin, with the no-plugin baseline published alongside.
 - [ ] Track B: published report. artiik is at least as good as "provider-native only" on retention (B1, B3, B5) at a cost per successful task that is no worse, or the report says where it isn't.
 - [ ] The core has zero required dependencies, and a wheel under 200 KB.
-- [ ] `claude plugin validate --strict` passes, the eval suite is green in CI, and the always-on skill cost is under 300 tokens.
+- [ ] `claude plugin validate --strict` passes, the eval suite is green in CI, and the always-on skill cost is under 150 tokens.
+- [ ] The skill works when added on its own, without the plugin, in Claude Code and in Codex.
 - [ ] Every README claim links to a test or a benchmark row.
 
 ---
 
-## 11. Decisions needed from you
+## 11. Decisions (settled 2026-09-27)
 
-| # | Decision | My recommendation |
+| # | Decision | Outcome |
 |---|---|---|
-| 1 | Python first with TypeScript at M6, or both in parallel? | Python first. The `spec/` fixtures keep the TypeScript port mechanical. |
-| 2 | Install artiik as a package, or vendor it into the agent's code by default? | Package by default; vendor mode as the fallback when new dependencies aren't allowed. |
-| 3 | A clean break from the 0.1 API? | Yes, with a short migration note. |
-| 4 | Which frameworks in M3? | Claude Agent SDK, OpenAI Agents SDK, LangChain v1/LangGraph and Pydantic AI. |
-| 5 | API budget for the Track A and B runs? | A number from you. Quick mode makes early runs cheap. |
-| 6 | Codex support at M6, or earlier? | M6, because the skill already works there unchanged. |
+| 1 | Python first, or Python and TypeScript in parallel? | **Python first.** TypeScript comes in M6, and the `spec/` fixtures keep the port mechanical. |
+| 2 | Install artiik as a package, or copy it into the agent's code? | **Package by default.** Vendor mode is the fallback when a project doesn't allow new dependencies. |
+| 3 | A clean break from the 0.1 API? | **Yes**, with a short migration note. |
+| 4 | Which frameworks in M3? | **Claude Agent SDK, OpenAI Agents SDK, LangChain v1/LangGraph and Pydantic AI.** |
+| 5 | API budget for the benchmarks? | **€100**, designed in §6.3. |
+| 6 | When to support Codex? | **At the end (M6).** The skill already works there unchanged; M6 tests it and packages a Codex plugin. |
+| 7 | Skill or plugin as the product? | **The skill.** Adding it alone must be enough (§5). The plugin is packaging. |
 
-**Next step once these are settled:** M0 (the reset), then M1, starting with the message model and the Tier 0 invariant harness. Everything else builds on those two.
+---
+
+## 12. How the work is tracked on GitHub
+
+- **One roadmap issue** holds this plan's summary. Its sub-issues are the milestones.
+- **One epic per milestone** (M0–M6): type *Feature*, label `epic`, with the org's *Start date*, *Target date*, *Priority* and *Effort* fields set, so a GitHub Project can draw them on a roadmap.
+- **One task issue per deliverable**, as a sub-issue of its epic: type *Task*, plus an `area:*` label and a language label. Each task has acceptance criteria and names what blocks it.
+- **Workflow:** a branch per task (or per milestone for small ones), and a pull request that says `Closes #n`, so merging closes the task and moves the epic's progress bar.
+- **Parked ideas**, such as the MCP server (issue #1), carry the `parked` label and stay out of the roadmap until after 1.0.
