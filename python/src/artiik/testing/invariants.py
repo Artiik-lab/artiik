@@ -24,8 +24,17 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
-from artiik.messages import Compaction, Format, JSONObject, JSONValue, Message, ToolResult, ToolUse
-from artiik.testing.recording import RecordedCall, entries, last_compaction, parse_system
+from artiik.messages import (
+    Compaction,
+    Format,
+    JSONObject,
+    JSONValue,
+    Message,
+    ToolResult,
+    ToolUse,
+    last_compaction,
+)
+from artiik.testing.recording import RecordedCall, entries, parse_system
 
 _SIGNED: dict[Format, frozenset[str]] = {
     Format.ANTHROPIC_MESSAGES: frozenset({"compaction", "thinking", "redacted_thinking"}),
@@ -240,12 +249,12 @@ def _canonical(value: JSONValue) -> str:
 
 
 def _compactions(call: RecordedCall) -> set[str]:
-    found: set[str] = set()
-    for message in call.conversation():
-        for block in message.blocks:
-            if isinstance(block, Compaction):
-                found.add(_canonical(block.data))
-    return found
+    return {
+        _canonical(block.data)
+        for message in call.conversation()
+        for block in message.blocks
+        if isinstance(block, Compaction)
+    }
 
 
 def _compacted(previous: RecordedCall, current: RecordedCall) -> bool:
@@ -254,16 +263,30 @@ def _compacted(previous: RecordedCall, current: RecordedCall) -> bool:
 
 def _first_rewrite(previous: RecordedCall, current: RecordedCall) -> str | None:
     for key in _CACHE_KEYS:
-        if _strip(previous.request.get(key)) != _strip(current.request.get(key)):
+        if not _same(previous.request.get(key), current.request.get(key)):
             return f"the {key} parameter changed"
-    before = [_strip(entry) for entry in entries(previous.format, previous.request)]
-    after = [_strip(entry) for entry in entries(current.format, current.request)]
+    before = entries(previous.format, previous.request)
+    after = entries(current.format, current.request)
     if len(after) < len(before):
         return f"the history shrank from {len(before)} to {len(after)} entries"
     for position, (old, new) in enumerate(zip(before, after, strict=False)):
-        if old != new:
+        if not _same(old, new):
             return f"entry {position} was rewritten"
     return None
+
+
+def _same(first: JSONValue, second: JSONValue) -> bool:
+    """Whether two JSON values are equal once ``cache_control`` markers are ignored."""
+    if isinstance(first, dict) and isinstance(second, dict):
+        keys = first.keys() - {"cache_control"}
+        if keys != second.keys() - {"cache_control"}:
+            return False
+        return all(_same(first[key], second[key]) for key in keys)
+    if isinstance(first, list) and isinstance(second, list):
+        return len(first) == len(second) and all(
+            _same(left, right) for left, right in zip(first, second, strict=True)
+        )
+    return type(first) is type(second) and first == second
 
 
 def _visible_text(call: RecordedCall) -> str:

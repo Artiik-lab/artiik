@@ -17,6 +17,7 @@ from artiik.messages import (
     Opaque,
     Thinking,
     ToolResult,
+    last_compaction,
 )
 from artiik.testing import (
     COMPACTION_BETA,
@@ -46,7 +47,7 @@ from artiik.testing import (
 )
 from artiik.testing.driver import Create
 from artiik.testing.model import is_user_turn
-from artiik.testing.recording import last_compaction, request_tokens
+from artiik.testing.recording import request_tokens
 from artiik.testing.tokens import count_messages
 
 ANTHROPIC = Format.ANTHROPIC_MESSAGES

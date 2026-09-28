@@ -32,7 +32,7 @@ from artiik.testing.errors import FakeAPIError
 from artiik.testing.model import DigestSummarizer, Policy, Reply, Summarizer, ToolLoopPolicy
 from artiik.testing.objects import FakeObject
 from artiik.testing.recording import RecordedCall
-from artiik.testing.tokens import MESSAGE_OVERHEAD, count_block, count_json, count_text
+from artiik.testing.tokens import DEFAULT, Tokenizer
 
 FORMAT = Format.ANTHROPIC_MESSAGES
 COMPACTION_BETA = "compact-2026-09-04"
@@ -43,8 +43,12 @@ MAX_INSTRUCTIONS_CHARS = 16_384
 class FakeAnthropic:
     """A stand-in for ``anthropic.Anthropic`` with ``messages.create`` and ``beta.messages.create``.
 
+    ``messages.count_tokens`` counts a request the way ``create`` would.
+
     - ``policy`` decides the replies; the default is a small tool-calling agent.
     - ``summarizer`` writes compaction summaries.
+    - ``tokenizer`` counts tokens; pass another one to stand in for a model
+      family whose tokenizer differs.
     - ``compaction_models`` lists the models that support on-demand compaction
       (``None`` means all of them).
     - ``faults`` maps a call index to an error to raise on that call, or to a
@@ -62,17 +66,21 @@ class FakeAnthropic:
         compaction_models: Collection[str] | None = None,
         faults: Mapping[int, FakeAPIError | str] | None = None,
         cache_lookback: int = 20,
+        tokenizer: Tokenizer | None = None,
     ) -> None:
         self.policy: Policy = policy if policy is not None else ToolLoopPolicy()
         self.summarizer: Summarizer = summarizer if summarizer is not None else DigestSummarizer()
         self.context_window = context_window
         self.compaction_models = None if compaction_models is None else frozenset(compaction_models)
         self.faults = dict(faults or {})
+        self.tokenizer = tokenizer if tokenizer is not None else DEFAULT
         self.calls: list[RecordedCall] = []
+        self.count_requests: list[JSONObject] = []
         self.messages = _Messages(self, beta=False)
         self.beta = _Beta(self)
         self._cache = AnthropicCache(lookback=cache_lookback)
         self._signed: dict[str, JSONObject] = {}
+        self._counted: int | None = None
 
     @property
     def requests(self) -> list[JSONObject]:
@@ -89,21 +97,54 @@ class FakeAnthropic:
         except FormatError as error:
             raise _invalid(str(error)) from error
         fault = self.faults.get(index)
+        self._counted = None
         try:
             if isinstance(fault, FakeAPIError):
                 raise fault
             response = self._respond(request, index, stop_override=fault)
         except FakeAPIError as error:
-            self.calls.append(RecordedCall(index, endpoint, FORMAT, request, error=error))
+            self.calls.append(
+                RecordedCall(
+                    index, endpoint, FORMAT, request, error=error, prompt_tokens=self._counted
+                )
+            )
             raise
-        self.calls.append(RecordedCall(index, endpoint, FORMAT, request, response=response))
+        self.calls.append(
+            RecordedCall(
+                index, endpoint, FORMAT, request, response=response, prompt_tokens=self._counted
+            )
+        )
         return FakeObject(clone(response))
 
+    def _count_tokens(self, kwargs: Mapping[str, object], *, beta: bool) -> FakeObject:
+        if not beta and "betas" in kwargs:
+            raise TypeError("Messages.count_tokens() got an unexpected keyword argument 'betas'")
+        try:
+            request = to_object(dict(kwargs), "request")
+        except FormatError as error:
+            raise _invalid(str(error)) from error
+        self.count_requests.append(request)
+        _, _, _, _, units = self._read(request, reply=False)
+        return FakeObject({"input_tokens": sum(unit.tokens for unit in units)})
+
     def _respond(self, request: JSONObject, index: int, *, stop_override: str | None) -> JSONObject:
+        model, messages, _, betas, units = self._read(request, reply=True)
+        tokens = sum(unit.tokens for unit in units)
+        self._counted = tokens
+        if tokens > self.context_window:
+            raise _invalid(f"prompt is too long: {tokens} tokens > {self.context_window} maximum")
+        if "compaction" in request:
+            return self._compact(request, model, messages, betas, tokens, index, stop_override)
+        return self._reply(model, messages, units, index, stop_override)
+
+    def _read(
+        self, request: JSONObject, *, reply: bool
+    ) -> tuple[str, list[Message], Message | None, set[str], list[Unit]]:
+        """Check a request the way the API does, and split it into cacheable units."""
         model = request.get("model")
         if not isinstance(model, str):
             raise _invalid("model: Field required")
-        if not isinstance(request.get("max_tokens"), int):
+        if reply and not isinstance(request.get("max_tokens"), int):
             raise _invalid("max_tokens: Field required")
         raw_messages = request.get("messages")
         if not isinstance(raw_messages, list):
@@ -118,15 +159,10 @@ class FakeAnthropic:
         betas = _betas(request)
         self._check_compaction_block(messages, COMPACTION_BETA in betas)
         self._check_thinking(raw_messages)
-        _check_cache_breakpoints(request)
+        cached = _check_cache_breakpoints(request) > 0
         _check_tool_pairs(messages)
-        units = _units(request, messages, system)
-        tokens = sum(unit.tokens for unit in units)
-        if tokens > self.context_window:
-            raise _invalid(f"prompt is too long: {tokens} tokens > {self.context_window} maximum")
-        if "compaction" in request:
-            return self._compact(request, model, messages, betas, tokens, index, stop_override)
-        return self._reply(model, messages, units, index, stop_override)
+        units = _units(request, messages, system, self.tokenizer, keyed=cached)
+        return model, messages, system, betas, units
 
     def _check_compaction_block(self, messages: Sequence[Message], beta_enabled: bool) -> None:
         found = [
@@ -223,7 +259,7 @@ class FakeAnthropic:
             "signature": _signature("compaction", index, summary),
         }
         self._sign(block)
-        iteration["output_tokens"] = count_text(summary)
+        iteration["output_tokens"] = self.tokenizer.count_text(summary)
         return _message(index, model, [block], "compaction", usage)
 
     def _reply(
@@ -241,7 +277,9 @@ class FakeAnthropic:
         )
         cache = self._cache.account(units)
         output_tokens = (
-            reply.output_tokens if reply.output_tokens is not None else count_json(content)
+            reply.output_tokens
+            if reply.output_tokens is not None
+            else self.tokenizer.count_json(content)
         )
         usage: JSONObject = {
             "input_tokens": cache.uncached,
@@ -289,6 +327,10 @@ class _Messages:
     def create(self, **kwargs: object) -> FakeObject:
         """Send a request, like ``client.messages.create``."""
         return self._client._create(kwargs, beta=self._beta)  # pyright: ignore[reportPrivateUsage]
+
+    def count_tokens(self, **kwargs: object) -> FakeObject:
+        """Count a request's input tokens, like ``client.messages.count_tokens``."""
+        return self._client._count_tokens(kwargs, beta=self._beta)  # pyright: ignore[reportPrivateUsage]
 
 
 class _Beta:
@@ -354,7 +396,7 @@ def _compaction_instructions(config: JSONValue) -> str | None:
     return instructions
 
 
-def _check_cache_breakpoints(request: JSONObject) -> None:
+def _check_cache_breakpoints(request: JSONObject) -> int:
     found = 1 if "cache_control" in request else 0
     for key in ("tools", "system", "messages"):
         found += _count_cache_control(request.get(key), top=key == "messages")
@@ -363,6 +405,7 @@ def _check_cache_breakpoints(request: JSONObject) -> None:
             f"A maximum of {MAX_CACHE_BREAKPOINTS} blocks with cache_control may be provided. "
             f"Found {found}."
         )
+    return found
 
 
 def _count_cache_control(value: JSONValue, *, top: bool = False) -> int:
@@ -417,40 +460,68 @@ def _check_tool_pairs(messages: Sequence[Message]) -> None:
                     )
 
 
-def _units(request: JSONObject, messages: Sequence[Message], system: Message | None) -> list[Unit]:
-    """Split a request into cacheable pieces, in cache order: tools, system, messages."""
+def _units(
+    request: JSONObject,
+    messages: Sequence[Message],
+    system: Message | None,
+    tokenizer: Tokenizer,
+    *,
+    keyed: bool,
+) -> list[Unit]:
+    """Split a request into cacheable pieces, in cache order: tools, system, messages.
+
+    Without ``keyed``, the request has no cache breakpoint, so the pieces only
+    carry their sizes: serializing them for cache keys would be wasted work.
+    """
     units: list[Unit] = []
     tools = request.get("tools")
     if isinstance(tools, list):
         for tool in tools:
-            units.append(_unit(tool, count_json(tool)))
+            units.append(_unit(tool, tokenizer.count_json(tool), keyed=keyed))
     raw_system = request.get("system")
     if system is not None:
         raw_blocks = raw_system if isinstance(raw_system, list) else [raw_system]
-        units.extend(_block_units(raw_blocks, system, overhead=0))
+        units.extend(_block_units(raw_blocks, system, overhead=0, tokenizer=tokenizer, keyed=keyed))
     raw_messages = request.get("messages")
     if isinstance(raw_messages, list):
         for raw, message in zip(raw_messages, messages, strict=True):
             content = raw.get("content") if isinstance(raw, dict) else None
             raw_blocks = content if isinstance(content, list) else [content]
-            units.extend(_block_units(raw_blocks, message, overhead=MESSAGE_OVERHEAD))
+            units.extend(
+                _block_units(
+                    raw_blocks,
+                    message,
+                    overhead=tokenizer.message_overhead,
+                    tokenizer=tokenizer,
+                    keyed=keyed,
+                )
+            )
     if "cache_control" in request and units:
         last = units[-1]
         units[-1] = Unit(key=last.key, tokens=last.tokens, breakpoint=True)
     return units
 
 
-def _block_units(raw_blocks: Sequence[JSONValue], message: Message, *, overhead: int) -> list[Unit]:
+def _block_units(
+    raw_blocks: Sequence[JSONValue],
+    message: Message,
+    *,
+    overhead: int,
+    tokenizer: Tokenizer,
+    keyed: bool,
+) -> list[Unit]:
     units: list[Unit] = []
     for position, (raw, block) in enumerate(zip(raw_blocks, message.blocks, strict=True)):
-        tokens = count_block(block) + (overhead if position == 0 else 0)
-        units.append(_unit(raw, tokens))
+        tokens = tokenizer.count_block(block) + (overhead if position == 0 else 0)
+        units.append(_unit(raw, tokens, keyed=keyed))
     if not message.blocks and overhead:
         units.append(Unit(key=json.dumps([message.role]), tokens=overhead))
     return units
 
 
-def _unit(raw: JSONValue, tokens: int) -> Unit:
+def _unit(raw: JSONValue, tokens: int, *, keyed: bool) -> Unit:
+    if not keyed:
+        return Unit(key="", tokens=tokens)
     if isinstance(raw, dict):
         key = json.dumps(without(raw, "cache_control"), sort_keys=True, ensure_ascii=False)
         return Unit(key=key, tokens=tokens, breakpoint="cache_control" in raw)

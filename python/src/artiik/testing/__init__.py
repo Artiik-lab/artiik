@@ -13,7 +13,14 @@ check the invariants on what was actually sent::
     assert_holds(check_all(fake.calls, budget=50_000))
 """
 
-from artiik.testing.driver import Create, Prepare, default_request, response_json, run_session
+from artiik.testing.driver import (
+    Create,
+    Prepare,
+    default_request,
+    response_json,
+    run_context,
+    run_session,
+)
 from artiik.testing.environment import Environment
 from artiik.testing.errors import FakeAPIError
 from artiik.testing.fake_anthropic import COMPACTION_BETA, FakeAnthropic
@@ -42,6 +49,7 @@ from artiik.testing.model import (
 )
 from artiik.testing.objects import FakeObject
 from artiik.testing.recording import RecordedCall
+from artiik.testing.tokens import Tokenizer
 
 __all__ = [
     "COMPACTION_BETA",
@@ -60,6 +68,7 @@ __all__ = [
     "Reply",
     "ScriptedPolicy",
     "Summarizer",
+    "Tokenizer",
     "ToolCall",
     "ToolLoopPolicy",
     "Violation",
@@ -73,5 +82,6 @@ __all__ = [
     "check_tool_pairs",
     "default_request",
     "response_json",
+    "run_context",
     "run_session",
 ]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from collections.abc import Mapping
 from typing import cast
@@ -13,28 +12,93 @@ from artiik.messages import Block, Format, JSONObject, JSONValue
 
 def to_json(value: object, path: str) -> JSONValue:
     """Return a deep copy of ``value``, checking that it only holds JSON types."""
-    if value is None or isinstance(value, bool | int | float | str):
+    try:
+        return _copy(value)
+    except _NotJSON as error:
+        location = path + "".join(reversed(error.steps))
+        raise FormatError(f"{location}: {error.problem}") from None
+
+
+class _NotJSON(Exception):
+    """A value that isn't JSON, found deep inside :func:`to_json`'s input.
+
+    The path is only built when this happens, from the steps each level adds
+    on the way out, so copying valid data doesn't pay for it.
+    """
+
+    def __init__(self, problem: str) -> None:
+        super().__init__(problem)
+        self.problem = problem
+        self.steps: list[str] = []
+
+
+def _copy(value: object) -> JSONValue:
+    kind = type(value)
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return cast(JSONValue, value)
+    if kind is dict:
+        return _copy_mapping(cast("dict[object, object]", value))
+    if kind is list or kind is tuple:
+        return _copy_items(cast("list[object] | tuple[object, ...]", value))
+    if isinstance(value, bool | int | float | str):
         return value
     if isinstance(value, Mapping):
-        mapping = cast("Mapping[object, object]", value)
-        result: JSONObject = {}
-        for key, item in mapping.items():
-            if not isinstance(key, str):
-                raise FormatError(f"{path}: object keys must be strings, got {type(key).__name__}")
-            result[key] = to_json(item, f"{path}.{key}")
-        return result
+        return _copy_mapping(cast("Mapping[object, object]", value))
     if isinstance(value, list | tuple):
-        items = cast("list[object] | tuple[object, ...]", value)
-        return [to_json(item, f"{path}[{index}]") for index, item in enumerate(items)]
-    raise FormatError(
-        f"{path}: expected JSON data, got {type(value).__name__}. "
+        return _copy_items(cast("list[object] | tuple[object, ...]", value))
+    raise _NotJSON(
+        f"expected JSON data, got {type(value).__name__}. "
         "Pass plain dicts and lists, for example the result of an SDK object's model_dump()."
     )
+
+
+def _copy_mapping(mapping: Mapping[object, object]) -> JSONObject:
+    result: JSONObject = {}
+    for key, item in mapping.items():
+        if type(key) is not str and not isinstance(key, str):
+            raise _NotJSON(f"object keys must be strings, got {type(key).__name__}")
+        try:
+            result[key] = _copy(item)
+        except _NotJSON as error:
+            error.steps.append(f".{key}")
+            raise
+    return result
+
+
+def _copy_items(items: list[object] | tuple[object, ...]) -> list[JSONValue]:
+    copied: list[JSONValue] = []
+    for index, item in enumerate(items):
+        try:
+            copied.append(_copy(item))
+        except _NotJSON as error:
+            error.steps.append(f"[{index}]")
+            raise
+    return copied
 
 
 def to_object(value: object, path: str) -> JSONObject:
     """Return a validated deep copy of a JSON object."""
     return expect_object(to_json(value, path), path)
+
+
+def plain(value: object) -> object:
+    """Turn SDK objects into plain data, including ones nested in dicts and lists.
+
+    The Anthropic and OpenAI SDK models convert with ``to_dict()``, which keeps
+    only the fields the API returned. ``model_dump()`` is the fallback; it can
+    add ``null`` fields that some APIs reject when a block is sent back.
+    """
+    if isinstance(value, Mapping):
+        mapping = cast("Mapping[object, object]", value)
+        return {key: plain(item) for key, item in mapping.items()}
+    if isinstance(value, list | tuple):
+        items = cast("list[object] | tuple[object, ...]", value)
+        return [plain(item) for item in items]
+    for name in ("to_dict", "model_dump"):
+        method = getattr(value, name, None)
+        if callable(method):
+            return plain(method())
+    return value
 
 
 def expect_object(value: JSONValue, path: str) -> JSONObject:
@@ -75,7 +139,7 @@ def without(data: JSONObject, *keys: str) -> JSONObject:
 
 def clone(data: JSONObject) -> JSONObject:
     """Return a deep copy, so callers can't mutate artiik's state or the other way round."""
-    return copy.deepcopy(data)
+    return cast(JSONObject, _copy(data))
 
 
 def parse_arguments(arguments: str) -> JSONValue:

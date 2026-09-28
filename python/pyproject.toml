@@ -30,6 +30,10 @@ classifiers = [
 # Optional extras are added with the features that need them.
 dependencies = []
 
+[project.optional-dependencies]
+# Exact token counts for the OpenAI formats (artiik.TiktokenCounter).
+tiktoken = ["tiktoken>=0.8"]
+
 [project.urls]
 Homepage = "https://github.com/Artiik-lab/artiik"
 Issues = "https://github.com/Artiik-lab/artiik/issues"

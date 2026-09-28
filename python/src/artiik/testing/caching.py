@@ -46,11 +46,13 @@ class AnthropicCache:
 
     def account(self, units: Sequence[Unit]) -> AnthropicUsage:
         """Split a request's tokens, and write the new prefixes to the cache."""
-        hashes, cumulative = _prefixes(units)
-        total = cumulative[-1] if cumulative else 0
         breakpoints = [index for index, unit in enumerate(units) if unit.breakpoint]
         if not breakpoints:
-            return AnthropicUsage(cache_read=0, cache_write=0, uncached=total)
+            return AnthropicUsage(
+                cache_read=0, cache_write=0, uncached=sum(unit.tokens for unit in units)
+            )
+        hashes, cumulative = _prefixes(units)
+        total = cumulative[-1]
         read_at = -1
         for point in breakpoints:
             for position in range(point, max(point - self.lookback, 0) - 1, -1):

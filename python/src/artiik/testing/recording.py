@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cached_property
 
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
-from artiik.messages import Compaction, Format, JSONObject, JSONValue, Message
+from artiik.messages import Format, JSONObject, JSONValue, Message, last_compaction
 from artiik.testing.errors import FakeAPIError
-from artiik.testing.tokens import count_json, count_messages
+from artiik.testing.tokens import DEFAULT, Tokenizer
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,8 @@ class RecordedCall:
     request: JSONObject
     response: JSONObject | None = None
     error: FakeAPIError | None = None
+    prompt_tokens: int | None = None
+    """The prompt's size as the fake counted it, when it got that far."""
 
     @property
     def ok(self) -> bool:
@@ -34,14 +36,21 @@ class RecordedCall:
 
     def conversation(self) -> list[Message]:
         """The request's messages (or Responses input items) in the neutral model."""
-        return parse_conversation(self.format, self.request)
+        return list(self._conversation)
+
+    @cached_property
+    def _conversation(self) -> tuple[Message, ...]:
+        # Parsed once: several invariants read the same calls.
+        return tuple(parse_conversation(self.format, self.request))
 
     def system(self) -> list[Message]:
         """The request's system prompt, if it's sent outside the messages."""
         return parse_system(self.format, self.request)
 
     def tokens(self) -> int:
-        """The size of the prompt the model reads, counted with :mod:`artiik.testing.tokens`."""
+        """The size of the prompt the model reads: the fake's count, or the default tokenizer's."""
+        if self.prompt_tokens is not None:
+            return self.prompt_tokens
         return request_tokens(self.format, self.request)
 
 
@@ -78,23 +87,12 @@ def parse_system(fmt: Format, request: JSONObject) -> list[Message]:
     return []
 
 
-def last_compaction(conversation: Sequence[Message]) -> int:
-    """The position of the latest compaction block or item, or 0 when there is none.
-
-    The model reads the conversation from there on: the Responses API ignores
-    the input before the latest compaction item, and the Messages API requires
-    the compaction block to come first.
-    """
-    for position in range(len(conversation) - 1, -1, -1):
-        if any(isinstance(block, Compaction) for block in conversation[position].blocks):
-            return position
-    return 0
-
-
-def request_tokens(fmt: Format, request: JSONObject) -> int:
+def request_tokens(fmt: Format, request: JSONObject, tokenizer: Tokenizer = DEFAULT) -> int:
     """Count the prompt a request gives the model: tools, system prompt and conversation."""
     tools = request.get("tools")
-    tool_tokens = sum(count_json(tool) for tool in tools) if isinstance(tools, list) else 0
+    tool_tokens = (
+        sum(tokenizer.count_json(tool) for tool in tools) if isinstance(tools, list) else 0
+    )
     conversation = parse_conversation(fmt, request)
     messages = parse_system(fmt, request) + conversation[last_compaction(conversation) :]
-    return tool_tokens + count_messages(messages)
+    return tool_tokens + tokenizer.count_messages(messages)
