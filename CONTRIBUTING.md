@@ -24,7 +24,7 @@ uv build                                         # wheel and sdist
 ## Rules
 
 - **The core has zero required dependencies.** Provider SDKs and heavier features go behind optional extras. A test and a CI job enforce this.
-- **Tests never use the network.** Anything that talks to a model uses fake clients.
+- **Tests never use the network.** Anything that talks to a model uses the fake clients in `artiik.testing`, and runtime features check the Tier 0 invariants (`check_all`) on the calls those clients record.
 - **No hard-coded model IDs in library code.** Model choices come from the caller or from configuration.
 - **Provider specifics are documented at the source.** Beta headers, block types and parameter shapes live in provider modules behind capability checks, each with a link to the provider page it comes from, because these APIs change often.
 - **Protect the prompt cache.** Never rewrite history before the last cache breakpoint between compactions; append instead.
