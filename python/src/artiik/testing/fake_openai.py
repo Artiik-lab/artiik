@@ -40,13 +40,14 @@ from artiik.messages import (
     Opaque,
     ToolResult,
     ToolUse,
+    last_compaction,
 )
 from artiik.testing.caching import OpenAICache, Unit
 from artiik.testing.errors import FakeAPIError
 from artiik.testing.model import DigestSummarizer, Policy, Reply, Summarizer, ToolLoopPolicy
 from artiik.testing.objects import FakeObject
-from artiik.testing.recording import RecordedCall, entries, last_compaction, parse_system
-from artiik.testing.tokens import count_json, count_message, count_messages, count_text
+from artiik.testing.recording import RecordedCall, entries, parse_system
+from artiik.testing.tokens import DEFAULT, Tokenizer
 
 _Handler: TypeAlias = "Callable[[JSONObject, int, str | None], JSONObject]"
 
@@ -56,6 +57,8 @@ class FakeOpenAI:
 
     - ``policy`` decides the replies; the default is a small tool-calling agent.
     - ``summarizer`` writes the summaries hidden in compaction items.
+    - ``tokenizer`` counts tokens; pass another one to stand in for a model
+      family whose tokenizer differs.
     - ``faults`` maps a call index to an error to raise on that call, or to a
       stop reason (``max_output_tokens``, ``length``, ``content_filter``) to
       return instead of the normal one.
@@ -70,16 +73,19 @@ class FakeOpenAI:
         summarizer: Summarizer | None = None,
         context_window: int = 128_000,
         faults: Mapping[int, FakeAPIError | str] | None = None,
+        tokenizer: Tokenizer | None = None,
     ) -> None:
         self.policy: Policy = policy if policy is not None else ToolLoopPolicy()
         self.summarizer: Summarizer = summarizer if summarizer is not None else DigestSummarizer()
         self.context_window = context_window
         self.faults = dict(faults or {})
+        self.tokenizer = tokenizer if tokenizer is not None else DEFAULT
         self.calls: list[RecordedCall] = []
         self.responses = _Responses(self)
         self.chat = _Chat(self)
         self._cache = OpenAICache()
         self._issued: dict[str, JSONObject] = {}
+        self._counted: int | None = None
 
     @property
     def requests(self) -> list[JSONObject]:
@@ -95,14 +101,23 @@ class FakeOpenAI:
         except FormatError as error:
             raise _invalid(str(error)) from error
         fault = self.faults.get(index)
+        self._counted = None
         try:
             if isinstance(fault, FakeAPIError):
                 raise fault
             response = handler(request, index, fault)
         except FakeAPIError as error:
-            self.calls.append(RecordedCall(index, endpoint, fmt, request, error=error))
+            self.calls.append(
+                RecordedCall(
+                    index, endpoint, fmt, request, error=error, prompt_tokens=self._counted
+                )
+            )
             raise
-        self.calls.append(RecordedCall(index, endpoint, fmt, request, response=response))
+        self.calls.append(
+            RecordedCall(
+                index, endpoint, fmt, request, response=response, prompt_tokens=self._counted
+            )
+        )
         return FakeObject(clone(response))
 
     def _responses_create(self, request: JSONObject, index: int, stop: str | None) -> JSONObject:
@@ -117,15 +132,18 @@ class FakeOpenAI:
         prompt, visible = entries(Format.OPENAI_RESPONSES, request)[start:], items[start:]
         _check_function_pairs(visible)
         instructions = parse_system(Format.OPENAI_RESPONSES, request)
-        base_tokens = _tool_tokens(request) + count_messages(instructions)
-        tokens = base_tokens + count_messages(visible)
+        base_tokens = _tool_tokens(request, self.tokenizer) + self.tokenizer.count_messages(
+            instructions
+        )
+        tokens = base_tokens + self.tokenizer.count_messages(visible)
+        self._counted = tokens
         output: list[JSONValue] = []
         threshold = _compaction_threshold(request)
         if threshold is not None and tokens > threshold:
             item = self._issue_compaction(visible, index)
             output.append(item)
             prompt, visible = [clone(item)], openai_responses.parse_items([item])
-            tokens = base_tokens + count_messages(visible)
+            tokens = base_tokens + self.tokenizer.count_messages(visible)
         if tokens > self.context_window:
             raise _context_exceeded(tokens, self.context_window, "input")
         reply = self.policy.reply(visible)
@@ -133,11 +151,15 @@ class FakeOpenAI:
         output.extend(reply_items)
         stop_reason = stop or reply.stop_reason
         incomplete = stop_reason in ("max_output_tokens", "content_filter")
-        cached = self._cache.account(_units(request, prompt, visible))
+        cached = self._cache.account(_units(request, prompt, visible, self.tokenizer))
         output_tokens = (
-            reply.output_tokens if reply.output_tokens is not None else count_json(reply_items)
+            reply.output_tokens
+            if reply.output_tokens is not None
+            else self.tokenizer.count_json(reply_items)
         )
-        reasoning_tokens = count_text(reply.thinking) if reply.thinking is not None else 0
+        reasoning_tokens = (
+            self.tokenizer.count_text(reply.thinking) if reply.thinking is not None else 0
+        )
         return {
             "id": f"resp_{index:04d}",
             "object": "response",
@@ -153,7 +175,8 @@ class FakeOpenAI:
         items = self._input(request)
         visible = items[last_compaction(items) :]
         _check_function_pairs(visible)
-        tokens = _tool_tokens(request) + count_messages(visible)
+        tokens = _tool_tokens(request, self.tokenizer) + self.tokenizer.count_messages(visible)
+        self._counted = tokens
         if tokens > self.context_window:
             raise _context_exceeded(tokens, self.context_window, "input")
         if not any(message.blocks for message in visible):
@@ -164,7 +187,7 @@ class FakeOpenAI:
             "object": "response.compaction",
             "model": model,
             "output": [item],
-            "usage": _responses_usage(tokens, 0, count_json(item), 0),
+            "usage": _responses_usage(tokens, 0, self.tokenizer.count_json(item), 0),
         }
 
     def _chat_create(self, request: JSONObject, index: int, stop: str | None) -> JSONObject:
@@ -176,7 +199,8 @@ class FakeOpenAI:
         except FormatError as error:
             raise _invalid(str(error), param="messages") from error
         _check_tool_messages(messages)
-        tokens = _tool_tokens(request) + count_messages(messages)
+        tokens = _tool_tokens(request, self.tokenizer) + self.tokenizer.count_messages(messages)
+        self._counted = tokens
         if tokens > self.context_window:
             raise _context_exceeded(tokens, self.context_window, "messages")
         reply = self.policy.reply(messages)
@@ -192,10 +216,12 @@ class FakeOpenAI:
             ]
         finish_reason = stop or reply.stop_reason or ("tool_calls" if reply.tool_calls else "stop")
         cached = self._cache.account(
-            _units(request, entries(Format.OPENAI_CHAT, request), messages)
+            _units(request, entries(Format.OPENAI_CHAT, request), messages, self.tokenizer)
         )
         output_tokens = (
-            reply.output_tokens if reply.output_tokens is not None else count_json(message)
+            reply.output_tokens
+            if reply.output_tokens is not None
+            else self.tokenizer.count_json(message)
         )
         return {
             "id": f"chatcmpl-{index:04d}",
@@ -354,9 +380,9 @@ def _arguments(arguments: JSONObject) -> str:
     return json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
 
 
-def _tool_tokens(request: JSONObject) -> int:
+def _tool_tokens(request: JSONObject, tokenizer: Tokenizer) -> int:
     tools = request.get("tools")
-    return sum(count_json(tool) for tool in tools) if isinstance(tools, list) else 0
+    return sum(tokenizer.count_json(tool) for tool in tools) if isinstance(tools, list) else 0
 
 
 def _compaction_threshold(request: JSONObject) -> int | None:
@@ -439,7 +465,10 @@ def _responses_usage(
 
 
 def _units(
-    request: JSONObject, prompt: Sequence[JSONValue], messages: Sequence[Message]
+    request: JSONObject,
+    prompt: Sequence[JSONValue],
+    messages: Sequence[Message],
+    tokenizer: Tokenizer,
 ) -> list[Unit]:
     """Split the prompt the model reads into cacheable pieces: instructions, tools, entries.
 
@@ -448,12 +477,15 @@ def _units(
     units: list[Unit] = []
     instructions = request.get("instructions")
     if isinstance(instructions, str):
-        units.append(Unit(key=json.dumps(instructions), tokens=count_json(instructions)))
+        units.append(Unit(key=json.dumps(instructions), tokens=tokenizer.count_json(instructions)))
     tools = request.get("tools")
     if isinstance(tools, list):
         units.extend(
-            Unit(key=json.dumps(tool, sort_keys=True), tokens=count_json(tool)) for tool in tools
+            Unit(key=json.dumps(tool, sort_keys=True), tokens=tokenizer.count_json(tool))
+            for tool in tools
         )
     for raw, message in zip(prompt, messages, strict=True):
-        units.append(Unit(key=json.dumps(raw, sort_keys=True), tokens=count_message(message)))
+        units.append(
+            Unit(key=json.dumps(raw, sort_keys=True), tokens=tokenizer.count_message(message))
+        )
     return units

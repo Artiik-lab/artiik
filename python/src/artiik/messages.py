@@ -14,6 +14,7 @@ Messages and blocks are immutable. Change them with :func:`dataclasses.replace`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, TypeAlias
@@ -200,3 +201,16 @@ class Message:
     def tool_results(self) -> tuple[ToolResult, ...]:
         """The tool results in this message."""
         return tuple(block for block in self.blocks if isinstance(block, ToolResult))
+
+
+def last_compaction(conversation: Sequence[Message]) -> int:
+    """The position of the latest compaction block or item, or 0 when there is none.
+
+    The model reads the conversation from there on: the Responses API ignores
+    the input before the latest compaction item, and the Messages API requires
+    the compaction block to come first.
+    """
+    for position in range(len(conversation) - 1, -1, -1):
+        if any(isinstance(block, Compaction) for block in conversation[position].blocks):
+            return position
+    return 0

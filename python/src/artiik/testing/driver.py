@@ -1,12 +1,18 @@
-"""A plain agent loop for tests and baselines: send the history, run the tools, repeat."""
+"""Agent loops for tests and baselines: send the history, run the tools, repeat.
+
+:func:`run_session` keeps the history itself and sends it through an optional
+``prepare`` strategy. :func:`run_context` lets an :class:`~artiik.Context`
+manage the history, the way an application uses artiik.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
+from artiik.context import Context
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
-from artiik.formats._json import expect_list, expect_object, to_object
+from artiik.formats._json import expect_list, expect_object, plain, to_object
 from artiik.messages import Format, JSONObject, JSONValue, Message, ToolResult, ToolUse
 from artiik.testing.environment import Environment
 
@@ -86,6 +92,34 @@ def run_session(
     return history
 
 
+def run_context(
+    context: Context,
+    create: Create,
+    turns: Sequence[str],
+    *,
+    environment: Environment | None = None,
+    params: Mapping[str, Any] | None = None,
+    max_steps: int = 20,
+) -> None:
+    """Run a conversation through a context, as an application would.
+
+    For each user turn: add it, then ``create(**context.prepare(**params))``,
+    ``context.record(response)``, and run the pending tool calls in
+    ``environment``, until the model answers without calling a tool.
+    """
+    tools = environment if environment is not None else Environment()
+    for text in turns:
+        context.add(Message.from_text("user", text))
+        for _ in range(max_steps):
+            context.record(create(**context.prepare(**dict(params or {}))))
+            calls = context.pending_tool_calls()
+            if not calls:
+                break
+            context.add(*_results(context.api, calls, tools))
+        else:
+            raise AssertionError(f"the model didn't finish the turn within {max_steps} steps")
+
+
 def response_json(response: object) -> JSONObject:
     """Read a response as JSON.
 
@@ -93,11 +127,7 @@ def response_json(response: object) -> JSONObject:
     returned; ``model_dump()`` would add ``null`` fields that some APIs reject
     when the blocks are sent back.
     """
-    for name in ("to_dict", "model_dump"):
-        method = getattr(response, name, None)
-        if callable(method):
-            return to_object(method(), "response")
-    return to_object(response, "response")
+    return to_object(plain(response), "response")
 
 
 def _send(create: Create, fmt: Format, base: JSONObject, sent: Sequence[Message]) -> list[Message]:
