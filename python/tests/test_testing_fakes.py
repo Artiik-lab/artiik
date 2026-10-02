@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+from artiik.formats import openai_responses
 from artiik.formats._json import expect_list, expect_object
 from artiik.messages import (
     Compaction,
@@ -37,6 +38,7 @@ from artiik.testing import (
 )
 from artiik.testing.caching import AnthropicCache, AnthropicUsage, OpenAICache, Unit
 from artiik.testing.driver import Create
+from artiik.testing.fake_anthropic import THRESHOLD_BETA, THRESHOLD_MINIMUM
 from artiik.testing.tokens import (
     BLOCK_OVERHEAD,
     MEDIA_TOKENS,
@@ -183,6 +185,19 @@ def test_anthropic_betas_need_the_beta_endpoint() -> None:
         FakeAnthropic().messages.create(
             model=MODEL, max_tokens=10, messages=[user("x")], betas=[COMPACTION_BETA]
         )
+
+
+@pytest.mark.parametrize("name", ["compaction", "context_management", "mcp_servers"])
+def test_anthropic_beta_parameters_need_the_beta_endpoint(name: str) -> None:
+    # Like the SDK, whose plain methods don't take these keyword arguments.
+    fake = FakeAnthropic()
+    extra: dict[str, JSONValue] = {name: {}}
+    with pytest.raises(TypeError, match=name):
+        fake.messages.create(model=MODEL, max_tokens=10, messages=[user("x")], **extra)
+    with pytest.raises(TypeError, match=name):
+        fake.messages.count_tokens(model=MODEL, messages=[user("x")], **extra)
+    with pytest.raises(TypeError, match="betas"):
+        fake.models.retrieve(MODEL, betas=[COMPACTION_BETA])
 
 
 @pytest.mark.parametrize(
@@ -454,6 +469,120 @@ def test_compaction_unavailable_is_a_529_with_an_error_code() -> None:
 # Anthropic prompt caching
 
 
+def test_an_anthropic_beta_header_replaces_the_betas_list() -> None:
+    # The SDK sends betas as the anthropic-beta header, and extra_headers wins.
+    fake = FakeAnthropic()
+    block = compact(fake)
+    with pytest.raises(FakeAPIError, match="'compaction' is not one of the expected"):
+        fake.beta.messages.create(
+            model=MODEL,
+            max_tokens=100,
+            betas=[COMPACTION_BETA],
+            messages=[assistant([block]), user("Continue.")],
+            extra_headers={"Anthropic-Beta": "another-beta"},
+        )
+
+
+def test_the_models_api_reports_compaction_support_on_the_beta() -> None:
+    fake = FakeAnthropic(compaction_models={"large-model"})
+    large = response_json(fake.beta.models.retrieve("large-model", betas=[COMPACTION_BETA]))
+    capabilities = expect_object(large["capabilities"], "capabilities")
+    assert capabilities["compaction"] == {"supported": True, "summarize": {"supported": True}}
+    small = response_json(fake.beta.models.retrieve("small-model", betas=[COMPACTION_BETA]))
+    capabilities = expect_object(small["capabilities"], "capabilities")
+    assert capabilities["compaction"] == {"supported": False, "summarize": {"supported": False}}
+    plain = response_json(fake.models.retrieve("large-model"))
+    assert plain["capabilities"] is None
+    assert plain["max_input_tokens"] == fake.context_window
+    assert fake.model_requests == ["large-model", "small-model", "large-model"]
+
+
+def threshold_request(
+    messages: Sequence[JSONObject], trigger: int = THRESHOLD_MINIMUM, **extra: JSONValue
+) -> JSONObject:
+    edit: JSONObject = {
+        "type": "compact_20260112",
+        "trigger": {"type": "input_tokens", "value": trigger},
+    }
+    return {
+        "model": MODEL,
+        "max_tokens": 1_000,
+        "betas": [THRESHOLD_BETA],
+        "messages": list(messages),
+        "context_management": {"edits": [edit]},
+        **extra,
+    }
+
+
+LONG_HISTORY: list[JSONObject] = [user("Read this log: " + "x" * 220_000), assistant("Read.")]
+
+
+def test_threshold_compaction_compacts_past_its_trigger() -> None:
+    fake = FakeAnthropic(policy=replies(Reply(text="Done."), Reply(text="Fine.")))
+    data = response_json(
+        fake.beta.messages.create(**threshold_request([*LONG_HISTORY, user("Go on.")]))
+    )
+    block, text = objects(data, "content")
+    assert set(block) == {"type", "content"}
+    assert block["type"] == "compaction"
+    assert text == {"type": "text", "text": "Done."}
+    compaction, message = objects(usage_of(data), "iterations")
+    assert compaction["type"] == "compaction"
+    assert cast(int, compaction["input_tokens"]) > THRESHOLD_MINIMUM
+    # The reply read the summary, and the top-level usage covers only that.
+    assert message["type"] == "message"
+    assert usage_of(data)["input_tokens"] == message["input_tokens"]
+    assert cast(int, message["input_tokens"]) < 1_000
+    # Sent back after the content it replaced, the block is where the model reads from.
+    reply = assistant([block, text])
+    fake.beta.messages.create(**threshold_request([*LONG_HISTORY, reply, user("Next.")]))
+    assert fake.calls[1].tokens() < 1_000
+
+
+def test_threshold_compaction_waits_for_its_trigger() -> None:
+    fake = FakeAnthropic(policy=replies(Reply(text="Done.")))
+    data = response_json(fake.beta.messages.create(**threshold_request(HISTORY)))
+    assert [block["type"] for block in objects(data, "content")] == ["text"]
+    assert [item["type"] for item in objects(usage_of(data), "iterations")] == ["message"]
+
+
+@pytest.mark.parametrize(
+    ("request_for", "expected"),
+    [
+        pytest.param(
+            lambda: threshold_request(HISTORY, betas=[]), "requires anthropic-beta", id="no-beta"
+        ),
+        pytest.param(lambda: threshold_request(HISTORY, trigger=40_000), "50000", id="low"),
+        pytest.param(
+            lambda: threshold_request(
+                [assistant([{"type": "compaction", "content": "Made up."}]), user("Go on.")]
+            ),
+            "doesn't match one the API returned",
+            id="made-up-block",
+        ),
+    ],
+)
+def test_threshold_requests_are_checked(
+    request_for: Callable[[], JSONObject], expected: str
+) -> None:
+    with pytest.raises(FakeAPIError, match=expected):
+        FakeAnthropic().beta.messages.create(**request_for())
+
+
+def test_threshold_compaction_cant_run_on_a_signed_block() -> None:
+    fake = FakeAnthropic()
+    block = compact(fake)
+    request = threshold_request(
+        [assistant([block]), user("Go on.")], betas=[THRESHOLD_BETA, COMPACTION_BETA]
+    )
+    with pytest.raises(FakeAPIError, match="signed compaction block"):
+        fake.beta.messages.create(**request)
+    with pytest.raises(FakeAPIError, match="does not support compact_20260112"):
+        FakeAnthropic(compaction_models={"large-model"}).beta.messages.create(
+            **threshold_request(HISTORY)
+        )
+
+
 def test_append_only_sessions_read_everything_the_last_call_cached() -> None:
     fake = FakeAnthropic()
     request: JSONObject = {
@@ -555,7 +684,8 @@ def test_responses_compact_server_side_past_the_threshold() -> None:
     assert set(compaction) == {"id", "type", "encrypted_content"}
     assert compaction["type"] == "compaction"
     assert cast(int, usage_of(data)["input_tokens"]) < 200
-    carried = [*long_input, compaction, message, user("Next.")]
+    # The docs allow dropping the input before the compaction item.
+    carried = [compaction, message, user("Next.")]
     data = response_json(
         fake.responses.create(model=MODEL, input=carried, context_management=settings)
     )
@@ -585,14 +715,30 @@ def test_responses_cache_the_prompt_the_model_read_after_compacting() -> None:
 
 
 def test_responses_compact_endpoint() -> None:
-    fake = FakeOpenAI(policy=replies(Reply(text="ok")))
-    data = response_json(fake.responses.compact(model=MODEL, input=[user("Plan the release.")]))
+    fake = FakeOpenAI(policy=replies(Reply(text="ok"), Reply(text="ok")))
+    call: JSONObject = {"type": "function_call", "call_id": "c1", "name": "ls", "arguments": "{}"}
+    output: JSONObject = {"type": "function_call_output", "call_id": "c1", "output": "a.txt"}
+    window = [user("Plan the release."), call, output, user("Ship it.")]
+    data = response_json(fake.responses.compact(model=MODEL, input=window))
     assert data["object"] == "response.compaction"
-    [item] = objects(data, "output")
+    # The user messages come back word for word, then one compaction item.
+    first, second, item = objects(data, "output")
+    assert first == {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Plan the release."}],
+    }
+    assert second["content"] == [{"type": "input_text", "text": "Ship it."}]
+    assert item["type"] == "compaction"
     assert fake.calls[0].is_compaction
-    fake.responses.create(model=MODEL, input=[item, user("Go on.")])
-    with pytest.raises(FakeAPIError, match="nothing to compact"):
-        fake.responses.compact(model=MODEL, input=[])
+    fake.responses.create(model=MODEL, input=[first, second, item, user("Go on.")])
+    # The model reads the user messages before the item, and nothing else before it.
+    read = openai_responses.parse_items([first, second, item, user("Go on.")])
+    assert fake.calls[1].tokens() == sum(count_message(message) for message in read)
+    unanswered: JSONObject = {**call, "call_id": "stale"}
+    fake.responses.create(model=MODEL, input=[unanswered, first, second, item, user("Go on.")])
+    with pytest.raises(FakeAPIError, match="at least one user message"):
+        fake.responses.compact(model=MODEL, input=[call, output])
 
 
 def test_reasoning_items_must_come_back_unchanged() -> None:

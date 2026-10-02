@@ -3,13 +3,14 @@
 import ast
 import dataclasses
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from artiik import FormatError
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
-from artiik.formats._json import to_json
+from artiik.formats._json import plain, to_json
 from artiik.messages import (
     Compaction,
     Format,
@@ -254,6 +255,26 @@ def test_compaction_summaries() -> None:
     assert isinstance(opaque_compaction, Compaction)
     assert opaque_compaction.summary is None
     assert item.bare_item
+
+
+class SDKModel:
+    """Stands in for an SDK model: dates are objects in Python mode and text in JSON mode."""
+
+    def to_dict(self, *, mode: str = "python", warnings: bool = True) -> dict[str, object]:
+        created = datetime(2026, 1, 1, tzinfo=UTC)
+        return {"id": "m", "created_at": created if mode == "python" else created.isoformat()}
+
+
+class DumpOnly:
+    def model_dump(self) -> dict[str, object]:
+        return {"type": "text", "text": "Hi"}
+
+
+def test_plain_reads_sdk_objects_as_json() -> None:
+    assert plain({"models": [SDKModel()], "block": DumpOnly()}) == {
+        "models": [{"id": "m", "created_at": "2026-01-01T00:00:00+00:00"}],
+        "block": {"type": "text", "text": "Hi"},
+    }
 
 
 def test_opaque_blocks_expose_their_type() -> None:

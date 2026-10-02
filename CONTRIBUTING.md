@@ -21,10 +21,24 @@ uv run pyright                                   # strict type checking
 uv build                                         # wheel and sdist
 ```
 
+### Live smoke tests
+
+[`python/live/`](python/live/) has one small test per compaction strategy that calls the real provider APIs. CI never runs them. Run them by hand after changing provider code; a run costs a few cents.
+
+```sh
+cd python
+export ARTIIK_LIVE=1
+export ANTHROPIC_API_KEY=... ARTIIK_ANTHROPIC_MODEL=...   # a model with compaction on demand
+export OPENAI_API_KEY=... ARTIIK_OPENAI_MODEL=...         # a model with Responses compaction
+uv run --with anthropic --with openai pytest live -s
+```
+
+A test skips when its provider's key or model isn't set. With `ARTIIK_LIVE_HEAVY=1`, the Anthropic threshold test also sends about 60,000 input tokens, so the API really compacts.
+
 ## Rules
 
 - **The core has zero required dependencies.** Provider SDKs and heavier features go behind optional extras. A test and a CI job enforce this.
-- **Tests never use the network.** Anything that talks to a model uses the fake clients in `artiik.testing`, and runtime features check the Tier 0 invariants (`check_all`) on the calls those clients record.
+- **Tests never use the network.** Anything that talks to a model uses the fake clients in `artiik.testing`, and runtime features check the Tier 0 invariants (`check_all`) on the calls those clients record. The hand-run smoke tests in `python/live/` are the only exception.
 - **No hard-coded model IDs in library code.** Model choices come from the caller or from configuration.
 - **Provider specifics are documented at the source.** Beta headers, block types and parameter shapes live in provider modules behind capability checks, each with a link to the provider page it comes from, because these APIs change often.
 - **Protect the prompt cache.** Never rewrite history before the last cache breakpoint between compactions; append instead.

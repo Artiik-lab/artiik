@@ -15,7 +15,7 @@ Messages and blocks are immutable. Change them with :func:`dataclasses.replace`.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Literal, TypeAlias
 
@@ -204,13 +204,36 @@ class Message:
 
 
 def last_compaction(conversation: Sequence[Message]) -> int:
-    """The position of the latest compaction block or item, or 0 when there is none.
-
-    The model reads the conversation from there on: the Responses API ignores
-    the input before the latest compaction item, and the Messages API requires
-    the compaction block to come first.
-    """
+    """The position of the latest compaction block or item, or 0 when there is none."""
     for position in range(len(conversation) - 1, -1, -1):
         if any(isinstance(block, Compaction) for block in conversation[position].blocks):
             return position
     return 0
+
+
+def visible(fmt: Format, conversation: Sequence[Message]) -> list[Message]:
+    """The part of a conversation the model reads.
+
+    A compaction block or item stands in for what came before it. Anthropic
+    drops the content before the latest compaction block. The Responses API
+    keeps the user messages before the latest compaction item, which
+    ``/responses/compact`` returns word for word ahead of the item, and
+    ignores the other items before it.
+    """
+    start = last_compaction(conversation)
+    if fmt is Format.OPENAI_RESPONSES:
+        users = [
+            message
+            for message in conversation[:start]
+            if message.role == "user" and not message.bare_item
+        ]
+        return [*users, *conversation[start:]]
+    if not conversation or not any(
+        isinstance(block, Compaction) for block in conversation[start].blocks
+    ):
+        return list(conversation)
+    message = conversation[start]
+    first = max(
+        position for position, block in enumerate(message.blocks) if isinstance(block, Compaction)
+    )
+    return [replace(message, blocks=message.blocks[first:]), *conversation[start + 1 :]]

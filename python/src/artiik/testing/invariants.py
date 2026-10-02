@@ -29,10 +29,9 @@ from artiik.messages import (
     Format,
     JSONObject,
     JSONValue,
-    Message,
     ToolResult,
     ToolUse,
-    last_compaction,
+    visible,
 )
 from artiik.testing.recording import RecordedCall, entries, parse_system
 
@@ -290,9 +289,7 @@ def _same(first: JSONValue, second: JSONValue) -> bool:
 
 
 def _visible_text(call: RecordedCall) -> str:
-    conversation = call.conversation()
-    visible = conversation[last_compaction(conversation) :]
-    messages: list[Message] = parse_system(call.format, call.request) + visible
+    messages = parse_system(call.format, call.request) + visible(call.format, call.conversation())
     return "\n".join(message.text for message in messages)
 
 

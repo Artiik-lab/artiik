@@ -10,7 +10,13 @@ Every request is checked the way the API checks it:
 - the on-demand compaction protocol (Anthropic docs, "Compaction on demand",
   beta ``compact-2026-09-04``): the beta header, the parameters that can't be
   combined with ``compaction``, and the returned block sent back first and
-  alone on every later request.
+  alone on every later request;
+- compaction at a token threshold (beta ``compact-2026-01-12``): a
+  ``compact_20260112`` edit in ``context_management`` compacts inside an
+  ordinary request once the input passes its trigger, and the API drops the
+  content before the latest compaction block.
+
+``models.retrieve`` reports each model's capabilities, as the Models API does.
 
 Replies come from a :class:`~artiik.testing.model.Policy`, summaries from a
 :class:`~artiik.testing.model.Summarizer`, and prompt caching is simulated.
@@ -26,7 +32,15 @@ from collections.abc import Collection, Mapping, Sequence
 from artiik.errors import FormatError
 from artiik.formats import anthropic_messages
 from artiik.formats._json import clone, to_object, without
-from artiik.messages import Compaction, Format, JSONObject, JSONValue, Message, ToolResult
+from artiik.messages import (
+    Compaction,
+    Format,
+    JSONObject,
+    JSONValue,
+    Message,
+    ToolResult,
+    visible,
+)
 from artiik.testing.caching import AnthropicCache, Unit
 from artiik.testing.errors import FakeAPIError
 from artiik.testing.model import DigestSummarizer, Policy, Reply, Summarizer, ToolLoopPolicy
@@ -36,8 +50,17 @@ from artiik.testing.tokens import DEFAULT, Tokenizer
 
 FORMAT = Format.ANTHROPIC_MESSAGES
 COMPACTION_BETA = "compact-2026-09-04"
+THRESHOLD_BETA = "compact-2026-01-12"
+THRESHOLD_MINIMUM = 50_000
 MAX_CACHE_BREAKPOINTS = 4
 MAX_INSTRUCTIONS_CHARS = 16_384
+BETA_ONLY = frozenset(
+    {"betas", "compaction", "context_management", "fallback_credit_token", "fallbacks"}
+    | {"mcp_servers", "speed"}
+)
+"""Parameters the SDK's ``beta.messages.create`` takes and ``messages.create`` doesn't."""
+COUNT_BETA_ONLY = frozenset({"betas", "compaction", "context_management", "mcp_servers", "speed"})
+"""The same for ``count_tokens``."""
 
 
 class FakeAnthropic:
@@ -49,8 +72,8 @@ class FakeAnthropic:
     - ``summarizer`` writes compaction summaries.
     - ``tokenizer`` counts tokens; pass another one to stand in for a model
       family whose tokenizer differs.
-    - ``compaction_models`` lists the models that support on-demand compaction
-      (``None`` means all of them).
+    - ``compaction_models`` lists the models that support compaction, on
+      demand and at a threshold (``None`` means all of them).
     - ``faults`` maps a call index to an error to raise on that call, or to a
       stop reason to return instead of the normal answer.
 
@@ -76,10 +99,13 @@ class FakeAnthropic:
         self.tokenizer = tokenizer if tokenizer is not None else DEFAULT
         self.calls: list[RecordedCall] = []
         self.count_requests: list[JSONObject] = []
+        self.model_requests: list[str] = []
         self.messages = _Messages(self, beta=False)
+        self.models = _Models(self, beta=False)
         self.beta = _Beta(self)
         self._cache = AnthropicCache(lookback=cache_lookback)
         self._signed: dict[str, JSONObject] = {}
+        self._threshold_blocks: set[str] = set()
         self._counted: int | None = None
 
     @property
@@ -90,8 +116,8 @@ class FakeAnthropic:
     def _create(self, kwargs: Mapping[str, object], *, beta: bool) -> FakeObject:
         index = len(self.calls)
         endpoint = "beta.messages.create" if beta else "messages.create"
-        if not beta and "betas" in kwargs:
-            raise TypeError("Messages.create() got an unexpected keyword argument 'betas'")
+        if not beta:
+            _check_keywords("Messages.create", kwargs, BETA_ONLY)
         try:
             request = to_object(dict(kwargs), "request")
         except FormatError as error:
@@ -117,8 +143,8 @@ class FakeAnthropic:
         return FakeObject(clone(response))
 
     def _count_tokens(self, kwargs: Mapping[str, object], *, beta: bool) -> FakeObject:
-        if not beta and "betas" in kwargs:
-            raise TypeError("Messages.count_tokens() got an unexpected keyword argument 'betas'")
+        if not beta:
+            _check_keywords("Messages.count_tokens", kwargs, COUNT_BETA_ONLY)
         try:
             request = to_object(dict(kwargs), "request")
         except FormatError as error:
@@ -127,8 +153,38 @@ class FakeAnthropic:
         _, _, _, _, units = self._read(request, reply=False)
         return FakeObject({"input_tokens": sum(unit.tokens for unit in units)})
 
+    def _model_info(self, model: str, kwargs: Mapping[str, object], *, beta: bool) -> FakeObject:
+        if not beta:
+            _check_keywords("Models.retrieve", kwargs, {"betas"})
+        self.model_requests.append(model)
+        supported = self.compaction_models is None or model in self.compaction_models
+        capabilities: JSONObject = {
+            "compaction": {"supported": supported, "summarize": {"supported": supported}},
+            "context_management": {
+                "supported": True,
+                "clear_tool_uses_20250919": {"supported": True},
+                "compact_20260112": {"supported": supported},
+            },
+        }
+        return FakeObject(
+            {
+                "type": "model",
+                "id": model,
+                "display_name": model,
+                "created_at": "2026-01-01T00:00:00Z",
+                "capabilities": capabilities if beta else None,
+                "max_input_tokens": self.context_window,
+                "max_tokens": 64_000,
+            }
+        )
+
     def _respond(self, request: JSONObject, index: int, *, stop_override: str | None) -> JSONObject:
-        model, messages, _, betas, units = self._read(request, reply=True)
+        model, messages, system, betas, units = self._read(request, reply=True)
+        edit = _threshold_edit(request, betas)
+        if edit is not None:
+            if self.compaction_models is not None and model not in self.compaction_models:
+                raise _invalid(f"model {model} does not support compact_20260112")
+            return self._threshold(request, model, messages, system, edit, index, stop_override)
         tokens = sum(unit.tokens for unit in units)
         self._counted = tokens
         if tokens > self.context_window:
@@ -157,24 +213,32 @@ class FakeAnthropic:
         except FormatError as error:
             raise _invalid(str(error)) from error
         betas = _betas(request)
-        self._check_compaction_block(messages, COMPACTION_BETA in betas)
+        self._check_compaction_block(messages, betas, threshold=_has_threshold_edit(request))
         self._check_thinking(raw_messages)
         cached = _check_cache_breakpoints(request) > 0
-        _check_tool_pairs(messages)
+        _check_tool_pairs(visible(FORMAT, messages))
         units = _units(request, messages, system, self.tokenizer, keyed=cached)
         return model, messages, system, betas, units
 
-    def _check_compaction_block(self, messages: Sequence[Message], beta_enabled: bool) -> None:
+    def _check_compaction_block(
+        self, messages: Sequence[Message], betas: set[str], *, threshold: bool
+    ) -> None:
         found = [
             (message_index, block_index, block)
             for message_index, message in enumerate(messages)
             for block_index, block in enumerate(message.blocks)
-            if isinstance(block, Compaction)
+            if isinstance(block, Compaction) and "signature" in block.data
         ]
+        self._check_threshold_blocks(messages, betas)
         if not found:
             return
+        if threshold:
+            raise _invalid(
+                "Threshold compaction (compact_20260112) can't run on a request that carries a "
+                "signed compaction block."
+            )
         message_index, block_index, block = found[0]
-        if not beta_enabled:
+        if COMPACTION_BETA not in betas:
             raise _invalid(
                 f"messages.{message_index}.content.{block_index}: 'compaction' is not one of "
                 "the expected content block types"
@@ -204,6 +268,101 @@ class FakeAnthropic:
                 "The compaction block's content doesn't match its signature.",
                 code="compaction_content_mismatch",
             )
+
+    def _check_threshold_blocks(self, messages: Sequence[Message], betas: set[str]) -> None:
+        """Check the unsigned blocks that threshold compaction returned."""
+        for message_index, message in enumerate(messages):
+            for block_index, block in enumerate(message.blocks):
+                if not isinstance(block, Compaction) or "signature" in block.data:
+                    continue
+                path = f"messages.{message_index}.content.{block_index}"
+                if THRESHOLD_BETA not in betas:
+                    raise _invalid(
+                        f"{path}: 'compaction' is not one of the expected content block types"
+                    )
+                if _canonical(block.data) not in self._threshold_blocks:
+                    raise _invalid(
+                        f"{path}: the compaction block doesn't match one the API returned.",
+                        code="compaction_content_mismatch",
+                    )
+
+    def _threshold(
+        self,
+        request: JSONObject,
+        model: str,
+        messages: Sequence[Message],
+        system: Message | None,
+        edit: JSONObject,
+        index: int,
+        stop_override: str | None,
+    ) -> JSONObject:
+        """Answer a request that carries a ``compact_20260112`` edit."""
+        shown = visible(FORMAT, messages)
+        fixed = self._fixed_tokens(request, system)
+        tokens = fixed + self.tokenizer.count_messages(shown)
+        self._counted = tokens
+        if tokens > self.context_window:
+            raise _invalid(f"prompt is too long: {tokens} tokens > {self.context_window} maximum")
+        iterations: list[JSONValue] = []
+        content: list[JSONValue] = []
+        reads = shown
+        trigger = edit["trigger"]
+        assert isinstance(trigger, dict)
+        value = trigger["value"]
+        assert isinstance(value, int)
+        if tokens > value:
+            instructions = edit.get("instructions")
+            summary = self.summarizer.summarize(
+                shown, instructions if isinstance(instructions, str) else None
+            )
+            block: JSONObject = {"type": "compaction", "content": summary}
+            self._threshold_blocks.add(_canonical(block))
+            content.append(block)
+            iterations.append(
+                {
+                    "type": "compaction",
+                    "input_tokens": tokens,
+                    "output_tokens": self.tokenizer.count_text(summary),
+                }
+            )
+            reads = [
+                Message(
+                    role="assistant", blocks=(Compaction(data=block, origin=FORMAT),), origin=FORMAT
+                )
+            ]
+        reply = self.policy.reply(reads)
+        reply_content = self._content(reply, index)
+        content.extend(reply_content)
+        input_tokens = fixed + self.tokenizer.count_messages(reads)
+        output_tokens = (
+            reply.output_tokens
+            if reply.output_tokens is not None
+            else self.tokenizer.count_json(reply_content)
+        )
+        iterations.append(
+            {"type": "message", "input_tokens": input_tokens, "output_tokens": output_tokens}
+        )
+        stop_reason = (
+            stop_override or reply.stop_reason or ("tool_use" if reply.tool_calls else "end_turn")
+        )
+        usage: JSONObject = {
+            "input_tokens": input_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "iterations": iterations,
+        }
+        return _message(index, model, content, stop_reason, usage)
+
+    def _fixed_tokens(self, request: JSONObject, system: Message | None) -> int:
+        tools = request.get("tools")
+        tool_tokens = (
+            sum(self.tokenizer.count_json(tool) for tool in tools) if isinstance(tools, list) else 0
+        )
+        system_tokens = (
+            sum(self.tokenizer.count_block(block) for block in system.blocks) if system else 0
+        )
+        return tool_tokens + system_tokens
 
     def _check_thinking(self, raw_messages: list[JSONValue]) -> None:
         for message_index, message in enumerate(raw_messages):
@@ -333,9 +492,20 @@ class _Messages:
         return self._client._count_tokens(kwargs, beta=self._beta)  # pyright: ignore[reportPrivateUsage]
 
 
+class _Models:
+    def __init__(self, client: FakeAnthropic, *, beta: bool) -> None:
+        self._client = client
+        self._beta = beta
+
+    def retrieve(self, model_id: str, **kwargs: object) -> FakeObject:
+        """Describe a model, like ``client.models.retrieve``; only the beta lists capabilities."""
+        return self._client._model_info(model_id, kwargs, beta=self._beta)  # pyright: ignore[reportPrivateUsage]
+
+
 class _Beta:
     def __init__(self, client: FakeAnthropic) -> None:
         self.messages = _Messages(client, beta=True)
+        self.models = _Models(client, beta=True)
 
 
 def _invalid(message: str, *, code: str | None = None) -> FakeAPIError:
@@ -361,17 +531,25 @@ def _message(
     }
 
 
+def _check_keywords(method: str, kwargs: Mapping[str, object], beta_only: Collection[str]) -> None:
+    for name in kwargs:
+        if name in beta_only:
+            raise TypeError(f"{method}() got an unexpected keyword argument {name!r}")
+
+
 def _betas(request: JSONObject) -> set[str]:
-    betas: set[str] = set()
-    raw = request.get("betas")
-    if isinstance(raw, list):
-        betas.update(item for item in raw if isinstance(item, str))
+    """The betas a request turns on.
+
+    Like the SDK, which sends ``betas`` as the ``anthropic-beta`` header, an
+    ``anthropic-beta`` entry in ``extra_headers`` replaces the list.
+    """
     headers = request.get("extra_headers")
     if isinstance(headers, dict):
-        header = headers.get("anthropic-beta")
-        if isinstance(header, str):
-            betas.update(part.strip() for part in header.split(",") if part.strip())
-    return betas
+        for name, header in headers.items():
+            if name.lower() == "anthropic-beta" and isinstance(header, str):
+                return {part.strip() for part in header.split(",") if part.strip()}
+    raw = request.get("betas")
+    return {item for item in raw if isinstance(item, str)} if isinstance(raw, list) else set()
 
 
 def _compaction_instructions(config: JSONValue) -> str | None:
@@ -526,3 +704,44 @@ def _unit(raw: JSONValue, tokens: int, *, keyed: bool) -> Unit:
         key = json.dumps(without(raw, "cache_control"), sort_keys=True, ensure_ascii=False)
         return Unit(key=key, tokens=tokens, breakpoint="cache_control" in raw)
     return Unit(key=json.dumps(raw, ensure_ascii=False), tokens=tokens)
+
+
+def _has_threshold_edit(request: JSONObject) -> bool:
+    settings = request.get("context_management")
+    edits = settings.get("edits") if isinstance(settings, dict) else None
+    return isinstance(edits, list) and any(
+        isinstance(edit, dict) and edit.get("type") == "compact_20260112" for edit in edits
+    )
+
+
+def _threshold_edit(request: JSONObject, betas: set[str]) -> JSONObject | None:
+    """The request's ``compact_20260112`` edit, checked, with its trigger filled in."""
+    settings = request.get("context_management")
+    if settings is None:
+        return None
+    if not isinstance(settings, dict):
+        raise _invalid("context_management: Input should be a valid dictionary")
+    edits = settings.get("edits")
+    if not isinstance(edits, list):
+        raise _invalid("context_management.edits: Field required")
+    for position, edit in enumerate(edits):
+        if not isinstance(edit, dict) or edit.get("type") != "compact_20260112":
+            continue
+        path = f"context_management.edits.{position}"
+        if THRESHOLD_BETA not in betas:
+            raise _invalid(f"{path}: compact_20260112 requires anthropic-beta: {THRESHOLD_BETA}")
+        trigger = edit.get("trigger", {"type": "input_tokens", "value": 150_000})
+        if not isinstance(trigger, dict) or trigger.get("type") != "input_tokens":
+            raise _invalid(f"{path}.trigger.type: Input should be 'input_tokens'")
+        value = trigger.get("value")
+        if not isinstance(value, int) or isinstance(value, bool) or value < THRESHOLD_MINIMUM:
+            raise _invalid(
+                f"{path}.trigger.value: Input should be greater than or equal to "
+                f"{THRESHOLD_MINIMUM}"
+            )
+        return {**edit, "trigger": {"type": "input_tokens", "value": value}}
+    return None
+
+
+def _canonical(block: JSONObject) -> str:
+    return json.dumps(without(block, "cache_control"), sort_keys=True, ensure_ascii=False)

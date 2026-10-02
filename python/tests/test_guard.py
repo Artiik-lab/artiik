@@ -159,14 +159,9 @@ def test_an_anthropic_compaction_block_stays_first() -> None:
     assert problems(ANTHROPIC, result.messages) == []
 
 
-def test_responses_keep_the_compaction_item_and_reasoning_with_its_calls() -> None:
-    items: list[JSONObject] = [
-        {"role": "user", "content": "Long ago."},
-        {"type": "function_call", "call_id": "old", "name": "ls", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "old", "output": "ok"},
-        {"id": "cmp_1", "type": "compaction", "encrypted_content": "x"},
-    ]
-    for number in range(4):
+def responses_turns(count: int) -> list[JSONObject]:
+    items: list[JSONObject] = []
+    for number in range(count):
         turn: list[JSONObject] = [
             {"role": "user", "content": f"Turn {number}."},
             {"type": "reasoning", "id": f"rs_{number}", "summary": [], "encrypted_content": "x"},
@@ -178,22 +173,56 @@ def test_responses_keep_the_compaction_item_and_reasoning_with_its_calls() -> No
             },
         ]
         items.extend(turn)
+    return items
+
+
+def test_responses_keep_the_compaction_item_and_reasoning_with_its_calls() -> None:
+    items: list[JSONObject] = [
+        {"role": "user", "content": "Long ago."},
+        {"type": "function_call", "call_id": "old", "name": "ls", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "old", "output": "ok"},
+        {"id": "cmp_1", "type": "compaction", "encrypted_content": "x"},
+        *responses_turns(4),
+    ]
     history = openai_responses.parse_items(items)
-    visible = history[3:]
-    tallies = [tally_message(message) for message in history]
-    result = trim(
-        RESPONSES,
-        history,
-        tallies,
-        size=size,
-        target=total([history[3], *history[-10:]]),
-        limit=total(visible),
-    )
-    assert result.dropped_turns == 2
-    assert result.messages[:4] == tuple(history[:4])
-    assert texts(result.messages)[4] == "Turn 2."
-    assert result.size == total(list(result.messages[3:]))
+    result = cut(RESPONSES, history, target=total([history[3], *history[-10:]]))
+    # What came before the compaction item is the oldest turn, so it goes first.
+    assert result.dropped_turns == 3
+    assert result.messages[0] == history[3]
+    assert texts(result.messages)[1] == "Turn 2."
+    assert result.size == total(list(result.messages))
     assert problems(RESPONSES, result.messages) == []
+
+
+def test_a_compaction_item_after_kept_user_messages_stays_in_place() -> None:
+    # /responses/compact returns the user messages, then the compaction item.
+    items: list[JSONObject] = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "A."}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "B."}]},
+        {"id": "cmp_1", "type": "compaction", "encrypted_content": "x"},
+        *responses_turns(3),
+    ]
+    history = openai_responses.parse_items(items)
+    result = cut(RESPONSES, history, target=total(history[2:]) - 1)
+    assert result.dropped_turns == 3
+    assert result.messages[0] == history[2]
+    assert texts(result.messages)[1] == "Turn 1."
+    assert problems(RESPONSES, result.messages) == []
+
+
+def test_a_compaction_block_stays_with_the_results_of_its_calls() -> None:
+    # A reply that compacted at a threshold can call tools after its block.
+    block: JSONObject = {"type": "compaction", "content": "Summary."}
+    call: JSONObject = {"type": "tool_use", "id": "t0", "name": "ls", "input": {}}
+    result: JSONObject = {"type": "tool_result", "tool_use_id": "t0", "content": "ok"}
+    history = anthropic(
+        [{"role": "assistant", "content": [block, call]}, {"role": "user", "content": [result]}],
+        *(anthropic_turn(number) for number in range(3)),
+    )
+    trimmed = cut(ANTHROPIC, history, target=total(history[:2] + history[-4:]))
+    assert trimmed.messages[:2] == tuple(history[:2])
+    assert trimmed.dropped_turns == 2
+    assert problems(ANTHROPIC, trimmed.messages) == []
 
 
 def chat_step(step: int) -> list[JSONObject]:

@@ -9,10 +9,12 @@
 - Compaction (OpenAI docs, "Compaction"): ``context_management=[{"type":
   "compaction", "compact_threshold": N}]`` compacts server-side once the input
   passes N tokens, and ``client.responses.compact(model=..., input=...)``
-  compacts on request. The guide doesn't document the compaction item's
-  fields, so this fake assumes ``{"id", "type": "compaction",
-  "encrypted_content"}``. It rejects items that come back modified, and ignores
-  the input before the latest compaction item.
+  compacts on request: it returns the input's user messages word for word,
+  then one compaction item ``{"id", "type": "compaction",
+  "encrypted_content"}``, and needs a user message in the input. The fake
+  rejects compaction items that come back modified. A compaction item stands
+  in for the items before it, so the model reads only the user messages
+  before the latest one, and everything from it on.
 - The context window.
 
 Replies come from a :class:`~artiik.testing.model.Policy`, and automatic prompt
@@ -128,8 +130,7 @@ class FakeOpenAI:
                 param="previous_response_id",
             )
         items = self._input(request)
-        start = last_compaction(items)
-        prompt, visible = entries(Format.OPENAI_RESPONSES, request)[start:], items[start:]
+        prompt, visible = _read_part(entries(Format.OPENAI_RESPONSES, request), items)
         _check_function_pairs(visible)
         instructions = parse_system(Format.OPENAI_RESPONSES, request)
         base_tokens = _tool_tokens(request, self.tokenizer) + self.tokenizer.count_messages(
@@ -173,20 +174,26 @@ class FakeOpenAI:
     def _responses_compact(self, request: JSONObject, index: int, stop: str | None) -> JSONObject:
         model = _model(request)
         items = self._input(request)
-        visible = items[last_compaction(items) :]
+        prompt, visible = _read_part(entries(Format.OPENAI_RESPONSES, request), items)
         _check_function_pairs(visible)
         tokens = _tool_tokens(request, self.tokenizer) + self.tokenizer.count_messages(visible)
         self._counted = tokens
         if tokens > self.context_window:
             raise _context_exceeded(tokens, self.context_window, "input")
-        if not any(message.blocks for message in visible):
-            raise _invalid("There is nothing to compact.", param="input")
+        users = [
+            _user_message(raw)
+            for raw, message in zip(prompt, visible, strict=True)
+            if _is_user_message(message)
+        ]
+        if not users:
+            raise _invalid("The input must include at least one user message.", param="input")
         item = self._issue_compaction(visible, index)
         return {
             "id": f"resp_{index:04d}",
             "object": "response.compaction",
+            "created_at": 0,
             "model": model,
-            "output": [item],
+            "output": [*users, item],
             "usage": _responses_usage(tokens, 0, self.tokenizer.count_json(item), 0),
         }
 
@@ -398,6 +405,31 @@ def _compaction_threshold(request: JSONObject) -> int | None:
                 raise _invalid("compact_threshold must be an integer.", param="context_management")
             return threshold
     return None
+
+
+def _is_user_message(message: Message) -> bool:
+    return message.role == "user" and not message.bare_item
+
+
+def _read_part(
+    raw: Sequence[JSONValue], items: Sequence[Message]
+) -> tuple[list[JSONValue], list[Message]]:
+    """What the model reads, as sent and parsed: the user messages before the latest
+    compaction item, and everything from it on."""
+    start = last_compaction(items)
+    keep = [index for index in range(start) if _is_user_message(items[index])]
+    keep.extend(range(start, len(items)))
+    return [raw[index] for index in keep], [items[index] for index in keep]
+
+
+def _user_message(raw: JSONValue) -> JSONObject:
+    """A user message as ``/responses/compact`` returns it: a typed item with content parts."""
+    data = clone(raw) if isinstance(raw, dict) else {}
+    content = data.get("content")
+    parts: JSONValue = (
+        [{"type": "input_text", "text": content}] if isinstance(content, str) else content
+    )
+    return {"type": "message", "role": "user", "content": parts}
 
 
 def _check_function_pairs(items: Sequence[Message]) -> None:

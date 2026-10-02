@@ -12,8 +12,8 @@ than a 400 from the API. The rules:
 - **Roles.** Each API has its own set, and some blocks belong to one role:
   tool calls and thinking to the assistant, Anthropic tool results to the user.
 - **Compaction.** Anthropic takes at most one compaction block, as the first
-  block of the first message. The Responses API reads the input from the
-  latest compaction item on, so only that part is checked.
+  block of the first message. A Responses compaction item stands in for the
+  items before it, so the pairing rules apply from the latest one on.
 - **Reasoning.** A Responses reasoning item must be followed by the item it
   came with.
 
@@ -63,15 +63,6 @@ def problems(api: Format, conversation: Sequence[Message]) -> list[str]:
             return _responses(conversation)
         case Format.OPENAI_CHAT:
             return _chat(conversation)
-
-
-def visible_start(api: Format, conversation: Sequence[Message]) -> int:
-    """Where the part of the conversation the model reads begins.
-
-    The Responses API ignores the input before the latest compaction item; the
-    other formats send everything.
-    """
-    return last_compaction(conversation) if api is Format.OPENAI_RESPONSES else 0
 
 
 def is_turn_start(message: Message) -> bool:
