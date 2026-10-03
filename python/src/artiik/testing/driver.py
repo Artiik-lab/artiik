@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeAlias
 
+from artiik.clearing import FETCH_TOOL, Clearing, answer
 from artiik.context import Context
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
 from artiik.formats._json import expect_list, expect_object, plain, to_object
@@ -104,8 +105,10 @@ def run_context(
     """Run a conversation through a context, as an application would.
 
     For each user turn: add it, then ``create(**context.prepare(**params))``,
-    ``context.record(response)``, and run the pending tool calls in
-    ``environment``, until the model answers without calling a tool.
+    ``context.record(response)``, and run the pending tool calls, until the
+    model answers without calling a tool. The context answers ``artiik_fetch``
+    calls when it clears tool output; ``environment`` runs the others. The
+    results go in as the provider's JSON, the way an application adds them.
     """
     tools = environment if environment is not None else Environment()
     for text in turns:
@@ -115,7 +118,7 @@ def run_context(
             calls = context.pending_tool_calls()
             if not calls:
                 break
-            context.add(*_results(context.api, calls, tools))
+            context.add(*_answers(context, calls, tools))
         else:
             raise AssertionError(f"the model didn't finish the turn within {max_steps} steps")
 
@@ -146,6 +149,21 @@ def _send(create: Create, fmt: Format, base: JSONObject, sent: Sequence[Message]
             choices = expect_list(response.get("choices"), "response.choices")
             choice = expect_object(choices[0], "response.choices[0]")
             return [openai_chat.parse_message(choice.get("message"), "choices[0].message")]
+
+
+def _answers(
+    context: Context, calls: Sequence[ToolUse], environment: Environment
+) -> list[JSONObject]:
+    """The results of the pending calls, in the provider's format."""
+    results = [
+        context.fetch_result(call)
+        if call.name == FETCH_TOOL and isinstance(context.clearing, Clearing)
+        else answer(context.api, call.id, environment.run(call.name, call.input))
+        for call in calls
+    ]
+    if context.api is Format.ANTHROPIC_MESSAGES:
+        return [{"role": "user", "content": list[JSONValue](results)}]
+    return results
 
 
 def _results(fmt: Format, calls: Sequence[ToolUse], environment: Environment) -> list[Message]:

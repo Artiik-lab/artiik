@@ -143,3 +143,6 @@ Thumbs.db
 *.index
 logs/
 temp/ 
+
+# The default artiik store: cleared tool outputs
+.artiik/

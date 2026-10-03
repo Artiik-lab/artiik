@@ -23,7 +23,7 @@ uv build                                         # wheel and sdist
 
 ### Live smoke tests
 
-[`python/live/`](python/live/) has small tests that call the real provider APIs: one per compaction strategy, and one for pins per provider. CI never runs them. Run them by hand after changing provider code; a run costs a few cents.
+[`python/live/`](python/live/) has small tests that call the real provider APIs: one per compaction strategy, one for pins per provider, one for clearing with `artiik_fetch` per API, and one for Anthropic's server-side clearing. CI never runs them. Run them by hand after changing provider code; a run costs a few cents.
 
 ```sh
 cd python

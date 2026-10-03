@@ -12,7 +12,8 @@ from artiik.messages import JSONObject, JSONValue
 class TraceEvent:
     """One thing artiik did or saw, tied to the request it happened on.
 
-    ``kind`` is ``prepare``, ``record``, ``guard``, ``compaction`` or ``pins``.
+    ``kind`` is ``prepare``, ``record``, ``guard``, ``clearing``, ``fetch``,
+    ``compaction`` or ``pins``.
     ``request`` numbers a context's ``prepare`` calls from 0, counting any that
     raised; a ``record`` event carries the number of the request it answers,
     and an event between requests the number of the next one. ``data`` holds
