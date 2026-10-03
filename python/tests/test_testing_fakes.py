@@ -1,5 +1,7 @@
 """The fake clients check requests the way the provider APIs do, and answer like them."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from itertools import pairwise
 from typing import cast
@@ -38,7 +40,12 @@ from artiik.testing import (
 )
 from artiik.testing.caching import AnthropicCache, AnthropicUsage, OpenAICache, Unit
 from artiik.testing.driver import Create
-from artiik.testing.fake_anthropic import THRESHOLD_BETA, THRESHOLD_MINIMUM
+from artiik.testing.fake_anthropic import (
+    CLEARED,
+    CLEARING_BETA,
+    THRESHOLD_BETA,
+    THRESHOLD_MINIMUM,
+)
 from artiik.testing.tokens import (
     BLOCK_OVERHEAD,
     MEDIA_TOKENS,
@@ -249,6 +256,51 @@ def test_thinking_blocks_must_come_back_unchanged() -> None:
             max_tokens=100,
             messages=[user("Go"), assistant([edited, tool_use]), result],
         )
+
+
+def test_thinking_blocks_can_be_bound_to_the_conversation_before_them() -> None:
+    def session(check: bool) -> tuple[FakeAnthropic, list[JSONObject]]:
+        fake = FakeAnthropic(
+            policy=replies(
+                Reply(thinking="First.", tool_calls=(ToolCall(name="read_log"),)),
+                Reply(thinking="Second.", text="Done."),
+                Reply(text="Fine."),
+            ),
+            check_thinking_prefix=check,
+        )
+        first = response_json(fake.messages.create(model=MODEL, max_tokens=100, messages=HISTORY))
+        call = objects(first, "content")[1]
+        result: JSONObject = {"type": "tool_result", "tool_use_id": call["id"], "content": "log"}
+        answer: JSONObject = {"role": "user", "content": [result]}
+        messages = [*HISTORY, assistant(first["content"]), answer]
+        second = response_json(fake.messages.create(model=MODEL, max_tokens=100, messages=messages))
+        return fake, [*messages, assistant(second["content"]), user("Thanks.")]
+
+    fake, messages = session(check=True)
+    # Sent back as made, with a cache breakpoint added, the blocks are fine.
+    marked = [*messages]
+    marked[4] = {
+        "role": "user",
+        "content": [{**objects(messages[4], "content")[0], "cache_control": {"type": "ephemeral"}}],
+    }
+    fake.messages.create(model=MODEL, max_tokens=100, messages=marked)
+    # Changing what came before a thinking block breaks it.
+    edited = [*messages]
+    edited[4] = {
+        "role": "user",
+        "content": [{**objects(messages[4], "content")[0], "content": "[cleared]"}],
+    }
+    with pytest.raises(
+        FakeAPIError, match=r"messages\.5\.content\.0: .*bound to a different conversation"
+    ):
+        fake.messages.create(model=MODEL, max_tokens=100, messages=edited)
+    fake, messages = session(check=False)
+    edited = [*messages]
+    edited[4] = {
+        "role": "user",
+        "content": [{**objects(messages[4], "content")[0], "content": "[cleared]"}],
+    }
+    fake.messages.create(model=MODEL, max_tokens=100, messages=edited)
 
 
 def test_raw_blocks_are_returned_as_given() -> None:
@@ -649,6 +701,233 @@ def test_threshold_compaction_cant_run_on_a_signed_block() -> None:
         FakeAnthropic(compaction_models={"large-model"}).beta.messages.create(
             **threshold_request(HISTORY)
         )
+
+
+class Seen:
+    """Answers "Done." and keeps each conversation the model read."""
+
+    def __init__(self) -> None:
+        self.conversations: list[list[Message]] = []
+
+    def reply(self, conversation: Sequence[Message]) -> Reply:
+        self.conversations.append(list(conversation))
+        return Reply(text="Done.")
+
+
+def tool_round(number: int, name: str = "read_log", size: int = 2_000) -> list[JSONObject]:
+    use: JSONObject = {"type": "tool_use", "id": f"t{number}", "name": name, "input": {"q": number}}
+    result: JSONObject = {"type": "tool_result", "tool_use_id": f"t{number}", "content": "x" * size}
+    return [assistant([use]), {"role": "user", "content": [result]}]
+
+
+ROUNDS: list[JSONObject] = [
+    user("Go."),
+    *tool_round(0),
+    *tool_round(1),
+    *tool_round(2, name="memory"),
+    *tool_round(3),
+]
+
+
+def clearing_request(
+    messages: Sequence[JSONObject], edit: JSONObject | None = None, **extra: JSONValue
+) -> JSONObject:
+    clear: JSONObject = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": 1_000},
+        "keep": {"type": "tool_uses", "value": 1},
+    }
+    return {
+        "model": MODEL,
+        "max_tokens": 100,
+        "betas": [CLEARING_BETA],
+        "messages": list(messages),
+        "context_management": {"edits": [clear if edit is None else edit]},
+        **extra,
+    }
+
+
+def results_read(conversation: Sequence[Message]) -> dict[str, object]:
+    return {
+        result.tool_use_id: result.content
+        for message in conversation
+        for result in message.tool_results
+    }
+
+
+def test_clearing_clears_the_oldest_tool_results_past_its_trigger() -> None:
+    seen = Seen()
+    fake = FakeAnthropic(policy=seen)
+    data = response_json(fake.beta.messages.create(**clearing_request(ROUNDS)))
+    applied = objects(expect_object(data["context_management"], "cm"), "applied_edits")
+    full = FakeAnthropic().messages.count_tokens(model=MODEL, messages=ROUNDS)
+    saved = cast(int, full.input_tokens) - fake.calls[0].tokens()
+    assert applied == [
+        {"type": "clear_tool_uses_20250919", "cleared_tool_uses": 3, "cleared_input_tokens": saved}
+    ]
+    assert saved > 1_000
+    assert results_read(seen.conversations[0]) == {
+        "t0": CLEARED,
+        "t1": CLEARED,
+        "t2": CLEARED,
+        "t3": "x" * 2_000,
+    }
+    # The tool calls stay, and so does the request as sent.
+    assert [use.id for m in seen.conversations[0] for use in m.tool_uses] == [
+        "t0",
+        "t1",
+        "t2",
+        "t3",
+    ]
+    assert fake.calls[0].request["messages"] == ROUNDS
+
+
+def test_clearing_waits_for_its_trigger_and_its_minimum() -> None:
+    seen = Seen()
+    fake = FakeAnthropic(policy=seen)
+    high: JSONObject = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": 100_000},
+    }
+    data = response_json(fake.beta.messages.create(**clearing_request(ROUNDS, high)))
+    assert data["context_management"] == {"applied_edits": []}
+    greedy: JSONObject = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": 1_000},
+        "keep": {"type": "tool_uses", "value": 3},
+        "clear_at_least": {"type": "input_tokens", "value": 1_000},
+    }
+    data = response_json(fake.beta.messages.create(**clearing_request(ROUNDS, greedy)))
+    # Keeping three tool uses, only t0 could go: about 500 tokens, under the minimum.
+    assert data["context_management"] == {"applied_edits": []}
+    assert all(content == "x" * 2_000 for content in results_read(seen.conversations[1]).values())
+    uses: JSONObject = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "tool_uses", "value": 4},
+    }
+    data = response_json(fake.beta.messages.create(**clearing_request(ROUNDS, uses)))
+    assert data["context_management"] == {"applied_edits": []}
+    uses["trigger"] = {"type": "tool_uses", "value": 3}
+    data = response_json(fake.beta.messages.create(**clearing_request(ROUNDS, uses)))
+    applied = objects(expect_object(data["context_management"], "cm"), "applied_edits")
+    assert applied[0]["cleared_tool_uses"] == 1
+
+
+def test_clearing_leaves_excluded_tools_and_can_clear_inputs() -> None:
+    seen = Seen()
+    fake = FakeAnthropic(policy=seen)
+    edit: JSONObject = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": 1_000},
+        "keep": {"type": "tool_uses", "value": 0},
+        "exclude_tools": ["memory"],
+        "clear_tool_inputs": ["read_log"],
+    }
+    fake.beta.messages.create(**clearing_request(ROUNDS, edit))
+    conversation = seen.conversations[0]
+    assert results_read(conversation) == {
+        "t0": CLEARED,
+        "t1": CLEARED,
+        "t2": "x" * 2_000,
+        "t3": CLEARED,
+    }
+    inputs = {use.id: use.input for m in conversation for use in m.tool_uses}
+    assert inputs == {"t0": {}, "t1": {}, "t2": {"q": 2}, "t3": {}}
+    edit["clear_tool_inputs"] = True
+    edit["exclude_tools"] = None
+    fake.beta.messages.create(**clearing_request(ROUNDS, edit))
+    inputs = {use.id: use.input for m in seen.conversations[1] for use in m.tool_uses}
+    assert inputs == {"t0": {}, "t1": {}, "t2": {}, "t3": {}}
+
+
+def test_clearing_counts_tokens_after_it_clears() -> None:
+    fake = FakeAnthropic()
+    request = clearing_request(ROUNDS)
+    del request["max_tokens"]
+    counted = response_json(fake.beta.messages.count_tokens(**request))
+    full = response_json(fake.messages.count_tokens(model=MODEL, messages=ROUNDS))
+    assert counted["context_management"] == {"original_input_tokens": full["input_tokens"]}
+    assert cast(int, counted["input_tokens"]) < cast(int, full["input_tokens"]) - 1_000
+    del request["betas"]
+    with pytest.raises(TypeError, match="context_management"):
+        fake.messages.count_tokens(**request)
+
+
+def test_clearing_runs_before_threshold_compaction() -> None:
+    rounds = [user("Go."), *(item for n in range(4) for item in tool_round(n, size=60_000))]
+    edits: list[JSONValue] = [
+        {
+            "type": "clear_tool_uses_20250919",
+            "trigger": {"type": "input_tokens", "value": 40_000},
+            "keep": {"type": "tool_uses", "value": 1},
+        },
+        {"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 50_000}},
+    ]
+    fake = FakeAnthropic(policy=replies(Reply(text="Done.")))
+    request = clearing_request(rounds, betas=[CLEARING_BETA, THRESHOLD_BETA])
+    request["context_management"] = {"edits": edits}
+    data = response_json(fake.beta.messages.create(**request))
+    # About 60,000 tokens before clearing, 15,000 after: under the compaction trigger.
+    assert [block["type"] for block in objects(data, "content")] == ["text"]
+    assert fake.calls[0].tokens() < 20_000
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        pytest.param({"betas": []}, "requires anthropic-beta: context-management", id="no-beta"),
+        pytest.param({"edit": {"keep_all": True}}, "keep_all: Extra inputs", id="extra-field"),
+        pytest.param(
+            {"edit": {"trigger": {"type": "messages", "value": 3}}}, "trigger.type", id="unit"
+        ),
+        pytest.param(
+            {"edit": {"trigger": {"type": "input_tokens", "value": 0}}}, "at least 1", id="zero"
+        ),
+        pytest.param(
+            {"edit": {"trigger": {"type": "input_tokens", "value": True}}}, "integer", id="bool"
+        ),
+        pytest.param(
+            {"edit": {"keep": {"type": "tool_uses", "value": -1}}}, "keep.value", id="keep"
+        ),
+        pytest.param(
+            {"edit": {"keep": {"type": "tool_uses", "value": 1, "unit": "x"}}},
+            "keep.unit: Extra",
+            id="keep-extra",
+        ),
+        pytest.param({"edit": {"clear_at_least": 500}}, "dictionary", id="least"),
+        pytest.param({"edit": {"exclude_tools": "memory"}}, "list of strings", id="exclude"),
+        pytest.param({"edit": {"clear_tool_inputs": "yes"}}, "boolean or a list", id="inputs"),
+        pytest.param({"edits": [{"type": "clear_everything"}]}, "does not match", id="type"),
+        pytest.param(
+            {"edits": [{"type": "clear_thinking_20251015"}]}, "doesn't simulate", id="thinking"
+        ),
+        pytest.param(
+            {
+                "edits": [
+                    {"type": "clear_tool_uses_20250919"},
+                    {"type": "clear_tool_uses_20250919"},
+                ]
+            },
+            "only one",
+            id="twice",
+        ),
+        pytest.param({"settings": {"edits": [], "mode": "x"}}, "mode: Extra", id="settings"),
+        pytest.param({"settings": {}}, "edits: Field required", id="no-edits"),
+        pytest.param({"settings": []}, "valid dictionary", id="not-an-object"),
+    ],
+)
+def test_clearing_requests_are_checked(change: JSONObject, expected: str) -> None:
+    edit: JSONObject = {"type": "clear_tool_uses_20250919"}
+    edit.update(cast(JSONObject, change.get("edit", {})))
+    request = clearing_request(ROUNDS, edit)
+    if "betas" in change:
+        request["betas"] = change["betas"]
+    if "edits" in change:
+        request["context_management"] = {"edits": change["edits"]}
+    if "settings" in change:
+        request["context_management"] = change["settings"]
+    with pytest.raises(FakeAPIError, match=expected):
+        FakeAnthropic().beta.messages.create(**request)
 
 
 def test_append_only_sessions_read_everything_the_last_call_cached() -> None:

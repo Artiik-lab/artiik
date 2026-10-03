@@ -4,6 +4,7 @@ Pre-alpha. The 0.1 API (``ContextManager``) was removed in the 0.2 rewrite; it
 stays available at the ``v0.1.1`` tag.
 """
 
+from artiik.clearing import FETCH_TOOL, AnthropicClearing, Clearing
 from artiik.compaction import (
     AnthropicCompaction,
     AnthropicThresholdCompaction,
@@ -33,6 +34,7 @@ from artiik.messages import (
     ToolUse,
 )
 from artiik.pins import Ledger, Pin
+from artiik.store import FileStore, MemoryStore, Store
 from artiik.tokens import AnthropicTokenCounter, Estimator, TiktokenCounter, TokenCounter
 from artiik.trace import Trace, TraceEvent
 from artiik.usage import Usage
@@ -40,12 +42,15 @@ from artiik.usage import Usage
 __version__ = "0.2.0.dev0"
 
 __all__ = [
+    "FETCH_TOOL",
+    "AnthropicClearing",
     "AnthropicCompaction",
     "AnthropicThresholdCompaction",
     "AnthropicTokenCounter",
     "ArtiikError",
     "Block",
     "BudgetError",
+    "Clearing",
     "Compaction",
     "CompactionJob",
     "CompactionResult",
@@ -53,18 +58,21 @@ __all__ = [
     "Context",
     "Document",
     "Estimator",
+    "FileStore",
     "Format",
     "FormatError",
     "Image",
     "JSONObject",
     "JSONValue",
     "Ledger",
+    "MemoryStore",
     "Message",
     "Opaque",
     "OpenAICompaction",
     "Pin",
     "RedactedThinking",
     "Role",
+    "Store",
     "SummaryCompaction",
     "Text",
     "Thinking",

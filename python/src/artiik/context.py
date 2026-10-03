@@ -42,6 +42,20 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from artiik.clearing import (
+    FETCH_TOOL,
+    ID_LENGTH,
+    AnthropicClearing,
+    Clearing,
+    Offload,
+    answer,
+    candidates,
+    default_trigger,
+    fetch_id,
+    fetch_tool,
+    original,
+    stub,
+)
 from artiik.compaction import (
     ANTHROPIC_BETA,
     ANTHROPIC_THRESHOLD_BETA,
@@ -55,6 +69,7 @@ from artiik.formats import anthropic_messages, openai_chat, openai_responses
 from artiik.formats._json import expect_list, expect_object, plain, to_json, to_object
 from artiik.guard import Trim, trim
 from artiik.messages import (
+    Block,
     Compaction,
     Format,
     JSONObject,
@@ -62,6 +77,7 @@ from artiik.messages import (
     Message,
     Opaque,
     Role,
+    ToolResult,
     ToolUse,
     last_compaction,
 )
@@ -83,6 +99,7 @@ from artiik.tokens import (
     Estimator,
     Tally,
     TokenCounter,
+    tally_block,
     tally_blocks,
     tally_json,
     tally_message,
@@ -197,6 +214,11 @@ class Context:
     - ``budget`` caps the prompt of every request, in tokens. When a request
       would go over, the guard drops the oldest turns until it fits
       ``trim_to`` of the budget, and logs what it did.
+    - ``clearing`` replaces old tool results with short stubs before it comes
+      to compaction, and keeps the originals for the ``artiik_fetch`` tool
+      (:class:`~artiik.clearing.Clearing`), or has Anthropic clear them on
+      its side (:class:`~artiik.clearing.AnthropicClearing`). See
+      :mod:`artiik.clearing`.
     - ``compaction`` summarizes the older history when a request would pass
       ``compact_at`` tokens, three quarters of the budget by default. See
       :mod:`artiik.compaction` for the strategies.
@@ -222,6 +244,7 @@ class Context:
         estimator: Estimator | None = None,
         counter: TokenCounter | None = None,
         trim_to: float = 0.8,
+        clearing: Clearing | AnthropicClearing | None = None,
         compaction: Compactor | None = None,
         compact_at: int | None = None,
         pin_role: Literal["system", "developer", "user"] | None = None,
@@ -239,6 +262,10 @@ class Context:
             raise ValueError(f"pin_budget must be a positive number of tokens, got {pin_budget}")
         self.compaction = compaction
         self.compact_at = _compact_at(self.api, compaction, compact_at, budget)
+        self.clearing = clearing
+        self.clear_at, self.clear_at_least = _clear_at(
+            self.api, clearing, budget, _compaction_point(compaction, self.compact_at)
+        )
         self.pin_role: Role = _pin_role(self.api, pin_role)
         self.pin_budget = pin_budget
         self.ledger = ledger if ledger is not None else Ledger()
@@ -271,6 +298,11 @@ class Context:
         self._own: dict[int, Message] = {}
         """The pin messages in the history, by identity."""
         self._outgoing = _Outgoing()
+        self._offload = Offload(clearing.store) if isinstance(clearing, Clearing) else None
+        self._cleared: set[str] = set()
+        """The ids of the tool calls whose results were cleared."""
+        self._held = False
+        """Whether clearing has said it leaves results before a thinking block."""
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -302,10 +334,10 @@ class Context:
         ``params`` are request parameters, merged over the context's own. The
         conversation itself can't be passed here; add messages with :meth:`add`.
         The context checks that the conversation is a valid request, raising
-        :class:`~artiik.errors.ValidationError` if it isn't, compacts it past
-        ``compact_at``, and lets the guard trim it when it would go over the
-        budget. Pin messages and restatements go at the end, after the latest
-        user turn.
+        :class:`~artiik.errors.ValidationError` if it isn't, clears old tool
+        output past the clearing trigger, compacts past ``compact_at``, and
+        lets the guard trim it when it would go over the budget. Pin messages
+        and restatements go at the end, after the latest user turn.
         """
         _check_params(self.api, params)
         merged = {**self.params, **params}
@@ -315,13 +347,15 @@ class Context:
         if self._startup is None:
             self._startup = tuple(self._pins.values())
         system = self._with_pins(_system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system)))
-        tools = _tools(merged.pop("tools", self.tools))
+        tools = self._with_fetch(_tools(merged.pop("tools", self.tools)))
         request = self._requests
         self._requests += 1
         validate(self.api, self._history)
         fixed = self._fixed(system, tools)
         self._outgoing = self._next_outgoing()
         size = self._size(fixed, model)
+        if self._should_clear(size):
+            size = self._clear(request, model, fixed, size)
         if self._should_compact(size, request):
             self._compact(request, model, (system, tools, merged), fixed, size)
             self._outgoing = self._next_outgoing()
@@ -354,12 +388,14 @@ class Context:
         ``response`` is what the call returned: an SDK object or its dict. The
         reply is kept exactly as the provider sent it, which signed blocks
         require. The usage calibrates the estimator and anchors the next
-        estimate.
+        estimate. Context edits the provider applied, such as Anthropic's
+        tool-result clearing, go to the trace.
         """
         data = to_object(plain(response), "response")
         replies = _replies(self.api, data)
         usage = read_usage(self.api, data)
         sent, self._sent = self._sent, None
+        number = sent.request if sent is not None else self._requests - 1
         in_place = sent is not None and len(self._history) == sent.entries
         # Without a reply, the messages artiik added stay pending: a system message
         # can't stand before the next user turn.
@@ -369,8 +405,13 @@ class Context:
         compacted = any(
             isinstance(block, Compaction) for reply in replies for block in reply.blocks
         )
+        edits = _applied_edits(self.api, data)
         if sent is not None and committed and in_place and usage.input_tokens > 0 and not compacted:
-            self.estimator.observe(sent.total, usage.input_tokens, api=self.api, model=sent.model)
+            # An edit made the provider count less than was sent: nothing to calibrate on.
+            if not edits:
+                self.estimator.observe(
+                    sent.total, usage.input_tokens, api=self.api, model=sent.model
+                )
             self._base = _Base(
                 entries=len(self._history),
                 tokens=usage.input_tokens,
@@ -382,11 +423,13 @@ class Context:
         for reply in replies:
             self._append(reply)
         if compacted:
-            self._drop_compacted(sent.request if sent is not None else self._requests - 1, replies)
+            self._drop_compacted(number, replies)
+        for edit in edits:
+            self._trace_edit(number, edit)
         self.last_usage = usage
         self.trace.emit(
             "record",
-            sent.request if sent is not None else self._requests - 1,
+            number,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
@@ -406,7 +449,7 @@ class Context:
         if not isinstance(model, str) or not model:
             raise TypeError("estimate() needs a model: pass model= to the Context or here")
         system = self._with_pins(_system(self.api, params.get(_SYSTEM_KEY[self.api], self.system)))
-        tools = _tools(params.get("tools", self.tools))
+        tools = self._with_fetch(_tools(params.get("tools", self.tools)))
         self._outgoing = self._next_outgoing()
         return self._size(self._fixed(system, tools), model)
 
@@ -426,7 +469,7 @@ class Context:
         if not isinstance(model, str) or not model:
             raise TypeError("compact() needs a model: pass model= to the Context or here")
         system = self._with_pins(_system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system)))
-        tools = _tools(merged.pop("tools", self.tools))
+        tools = self._with_fetch(_tools(merged.pop("tools", self.tools)))
         validate(self.api, self._history)
         fixed = self._fixed(system, tools)
         self._outgoing = self._next_outgoing()
@@ -508,6 +551,47 @@ class Context:
             use for message in self._history for use in message.tool_uses if use.id not in answered
         ]
 
+    def fetch(self, id: str) -> JSONValue:
+        """The original content of a tool result that clearing replaced, as the provider had it.
+
+        ``id`` is the one in the result's stub. Raises ``KeyError`` for an id
+        this context didn't clear.
+        """
+        if self._offload is None:
+            raise KeyError(f"no cleared tool output has the id {id!r}: this context doesn't clear")
+        return self._offload.get(id.strip().lower())
+
+    def fetch_result(self, call: ToolUse) -> JSONObject:
+        """Answer an ``artiik_fetch`` call with the tool result to add, in the provider's format.
+
+        Add it like your other tools' results: a ``tool_result`` block in the
+        next user message for Anthropic, a ``function_call_output`` item for
+        Responses, a ``tool`` message for Chat Completions. It holds the
+        cleared output exactly as it was sent before; an unknown id gets an
+        error the model can read::
+
+            for call in ctx.pending_tool_calls():
+                if call.name == artiik.FETCH_TOOL:
+                    results.append(ctx.fetch_result(call))
+                else:
+                    results.append(run_tool(call))
+        """
+        if call.name != FETCH_TOOL:
+            raise ValueError(f"{call.name!r} isn't an {FETCH_TOOL} call")
+        requested = fetch_id(call)
+        if requested is None:
+            self.trace.emit("fetch", self._requests, id=None, found=False)
+            return answer(self.api, call.id, f'{FETCH_TOOL} needs an "id" argument.', error=True)
+        try:
+            content = self.fetch(requested)
+        except KeyError:
+            self.trace.emit("fetch", self._requests, id=requested, found=False)
+            return answer(
+                self.api, call.id, f"No cleared tool output has the id {requested!r}.", error=True
+            )
+        self.trace.emit("fetch", self._requests, id=requested, found=True)
+        return answer(self.api, call.id, content)
+
     def _append(self, message: Message) -> None:
         self._history.append(message)
         self._tallies.append(tally_message(message))
@@ -553,6 +637,119 @@ class Context:
             and self.compact_at is not None
             and size > self.compact_at
             and (self._compaction_paused_until is None or request >= self._compaction_paused_until)
+        )
+
+    def _with_fetch(self, tools: list[JSONValue] | None) -> list[JSONValue] | None:
+        """The tools, with ``artiik_fetch`` from the first request on when clearing offers it."""
+        if not isinstance(self.clearing, Clearing) or not self.clearing.fetch:
+            return tools
+        present = tools or []
+        if any(_tool_name(self.api, tool) == FETCH_TOOL for tool in present):
+            return tools
+        return [*present, fetch_tool(self.api)]
+
+    def _should_clear(self, size: int) -> bool:
+        return isinstance(self.clearing, Clearing) and size > cast(int, self.clear_at)
+
+    def _clear(self, request: int, model: str, fixed: Tally, size: int) -> int:
+        """Clear a batch of old tool results, if it saves enough; return the new size."""
+        clearing = cast(Clearing, self.clearing)
+        offload = cast(Offload, self._offload)
+        found, held = candidates(
+            self.api,
+            self._history,
+            keep=clearing.keep,
+            exclude=clearing.exclude,
+            cleared=self._cleared,
+        )
+        if held and not self._held:
+            self._held = True
+            self.trace.emit("clearing", request, strategy="Clearing", outcome="held", results=held)
+            logger.warning(
+                "artiik clearing: %d tool results come before a thinking block, so they stay: "
+                "clearing them would change the history the block was made with. "
+                "AnthropicClearing clears them on the server instead",
+                held,
+            )
+        batch: list[tuple[int, int, ToolResult, str, int]] = []
+        saved = 0
+        for candidate in found:
+            tokens = self.estimator.estimate(
+                tally_block(candidate.result), api=self.api, model=model
+            )
+            if tokens < clearing.min_tokens:
+                continue
+            placeholder = stub(candidate.tool, "0" * ID_LENGTH, tokens, fetch=clearing.fetch)
+            after = self.estimator.estimate(
+                tally_block(dataclasses.replace(candidate.result, content=placeholder)),
+                api=self.api,
+                model=model,
+            )
+            if after >= tokens:
+                continue
+            batch.append(
+                (candidate.message, candidate.block, candidate.result, candidate.tool, tokens)
+            )
+            saved += tokens - after
+        if not batch or saved < (self.clear_at_least or 0):
+            return size
+        changed: dict[int, list[Block]] = {}
+        ids: list[JSONValue] = []
+        for index, position, result, tool, tokens in batch:
+            entry = offload.put(
+                self.api,
+                tool=tool,
+                tool_use_id=result.tool_use_id,
+                content=original(self.api, result),
+                tokens=tokens,
+            )
+            blocks = changed.setdefault(index, list(self._history[index].blocks))
+            blocks[position] = dataclasses.replace(
+                result, content=stub(tool, entry.id, tokens, fetch=clearing.fetch)
+            )
+            self._cleared.add(result.tool_use_id)
+            ids.append(entry.id)
+        for index, blocks in changed.items():
+            message = dataclasses.replace(self._history[index], blocks=tuple(blocks))
+            self._history[index] = message
+            self._tallies[index] = tally_message(message)
+        self._base = None
+        after = self._size(fixed, model)
+        self.trace.emit(
+            "clearing",
+            request,
+            strategy="Clearing",
+            outcome="cleared",
+            results=len(batch),
+            ids=ids,
+            tokens_saved=saved,
+            tokens_before=size,
+            tokens_after=after,
+        )
+        logger.info(
+            "artiik clearing: cleared %d tool results before request %d (about %d tokens, now "
+            "about %d)",
+            len(batch),
+            request,
+            size,
+            after,
+        )
+        return after
+
+    def _trace_edit(self, request: int, edit: JSONObject) -> None:
+        """Trace a context edit the provider applied, such as Anthropic's tool-result clearing.
+
+        The provider edits every request past its trigger, so this logs at debug level.
+        """
+        details = {
+            key: value for key, value in edit.items() if key not in ("type", "strategy", "edit")
+        }
+        self.trace.emit("clearing", request, strategy="provider", edit=edit.get("type"), **details)
+        logger.debug(
+            "artiik clearing: the provider applied %s on request %d: %s",
+            edit.get("type"),
+            request,
+            ", ".join(f"{key} {value}" for key, value in details.items()),
         )
 
     def _compact(
@@ -976,7 +1173,9 @@ class Context:
         exact = counter.count(self.api, self._build(model, system, tools, params))
         extra = _tally(self._outgoing.messages)
         total = fixed + sum(self._tallies, Tally()) + extra
-        self.estimator.observe(total, exact, api=self.api, model=model)
+        # With server-side clearing, the count may leave out what the provider clears.
+        if not isinstance(self.clearing, AnthropicClearing):
+            self.estimator.observe(total, exact, api=self.api, model=model)
         self._base = _Base(
             entries=len(self._history), tokens=exact, fixed=fixed, model=model, extra=extra
         )
@@ -1055,6 +1254,11 @@ class Context:
                 )
                 request["messages"] = prefix + openai_chat.dump_messages(conversation)
         request.update(copy.deepcopy(dict(params)))
+        # Clearing's edit goes before compaction's: clear first, then compact what's left.
+        if isinstance(self.clearing, AnthropicClearing):
+            self.clearing.configure(
+                self.api, request, trigger=self.clear_at, clear_at_least=self.clear_at_least
+            )
         if self.compaction is not None:
             self.compaction.configure(self.api, request, self.compact_at or 0)
         if self.api is Format.ANTHROPIC_MESSAGES:
@@ -1205,6 +1409,64 @@ def _compact_at(
     if not compaction.active:
         compaction.configure(api, {}, compact_at or 0)
     return compact_at
+
+
+def _compaction_point(compaction: Compactor | None, compact_at: int | None) -> int | None:
+    """Where compaction happens: ``compact_at``, or a provider strategy's own threshold."""
+    if compaction is None:
+        return None
+    if not compaction.active and compaction.threshold is not None:
+        return compaction.threshold
+    return compact_at
+
+
+def _clear_at(
+    api: Format,
+    clearing: Clearing | AnthropicClearing | None,
+    budget: int | None,
+    compact_at: int | None,
+) -> tuple[int | None, int | None]:
+    """Check the clearing settings, and work out the trigger and the least a batch clears."""
+    if clearing is None:
+        return None, None
+    if isinstance(clearing, AnthropicClearing) and api is not Format.ANTHROPIC_MESSAGES:
+        raise ValueError("AnthropicClearing works with the anthropic-messages API")
+    trigger = clearing.trigger
+    counts_uses = isinstance(clearing, AnthropicClearing) and clearing.trigger_tool_uses is not None
+    if trigger is None and not counts_uses:
+        trigger = default_trigger(budget, compact_at)
+    if trigger is None and isinstance(clearing, Clearing):
+        raise ValueError("clearing needs a trigger, or a budget or compact_at to work it out from")
+    if trigger is not None and budget is not None and trigger > budget:
+        raise ValueError(f"the clearing trigger ({trigger}) can't be above the budget ({budget})")
+    if trigger is not None and compact_at is not None and trigger > compact_at:
+        raise ValueError(
+            f"the clearing trigger ({trigger}) is above the compaction threshold ({compact_at}), "
+            "so compaction would always come first: lower the trigger"
+        )
+    least = clearing.clear_at_least
+    if least is None and trigger is not None:
+        least = trigger // 4
+    return trigger, least
+
+
+def _applied_edits(api: Format, data: JSONObject) -> list[JSONObject]:
+    """The context edits an Anthropic response says the API applied."""
+    if api is not Format.ANTHROPIC_MESSAGES:
+        return []
+    settings = data.get("context_management")
+    edits = settings.get("applied_edits") if isinstance(settings, dict) else None
+    return [edit for edit in edits if isinstance(edit, dict)] if isinstance(edits, list) else []
+
+
+def _tool_name(api: Format, tool: JSONValue) -> JSONValue:
+    """The name of a tool definition, in the API's format."""
+    if not isinstance(tool, dict):
+        return None
+    if api is Format.OPENAI_CHAT:
+        function = tool.get("function")
+        return function.get("name") if isinstance(function, dict) else None
+    return tool.get("name")
 
 
 def _tally(messages: Sequence[Message]) -> Tally:
