@@ -4,6 +4,15 @@ Pre-alpha. The 0.1 API (``ContextManager``) was removed in the 0.2 rewrite; it
 stays available at the ``v0.1.1`` tag.
 """
 
+from artiik.compaction import (
+    AnthropicCompaction,
+    AnthropicThresholdCompaction,
+    CompactionJob,
+    CompactionResult,
+    Compactor,
+    OpenAICompaction,
+    SummaryCompaction,
+)
 from artiik.context import Context
 from artiik.errors import ArtiikError, BudgetError, FormatError, ValidationError
 from artiik.messages import (
@@ -30,11 +39,16 @@ from artiik.usage import Usage
 __version__ = "0.2.0.dev0"
 
 __all__ = [
+    "AnthropicCompaction",
+    "AnthropicThresholdCompaction",
     "AnthropicTokenCounter",
     "ArtiikError",
     "Block",
     "BudgetError",
     "Compaction",
+    "CompactionJob",
+    "CompactionResult",
+    "Compactor",
     "Context",
     "Document",
     "Estimator",
@@ -45,8 +59,10 @@ __all__ = [
     "JSONValue",
     "Message",
     "Opaque",
+    "OpenAICompaction",
     "RedactedThinking",
     "Role",
+    "SummaryCompaction",
     "Text",
     "Thinking",
     "TiktokenCounter",

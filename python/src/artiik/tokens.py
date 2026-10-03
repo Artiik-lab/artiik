@@ -40,7 +40,7 @@ from artiik.messages import (
     Thinking,
     ToolResult,
     ToolUse,
-    last_compaction,
+    visible,
 )
 
 CHARS_PER_TOKEN = 4.0
@@ -135,8 +135,8 @@ def tally_json(value: JSONValue) -> Tally:
 def tally_request(api: Format, request: Mapping[str, Any]) -> Tally:
     """The raw material of a whole request's estimate: tools, system prompt and conversation.
 
-    For the Responses API, only the input from the latest compaction item on
-    counts, as that's all the model reads.
+    Only the part of the conversation the model reads counts: see
+    :func:`~artiik.messages.visible`.
     """
     data = to_object(plain(dict(request)), "request")
     tally = Tally()
@@ -157,11 +157,10 @@ def tally_request(api: Format, request: Mapping[str, Any]) -> Tally:
             raw = data.get("input")
             items = [{"role": "user", "content": raw}] if isinstance(raw, str) else raw
             messages = openai_responses.parse_items(items if isinstance(items, list) else [])
-            messages = messages[last_compaction(messages) :]
         case Format.OPENAI_CHAT:
             raw = data.get("messages")
             messages = openai_chat.parse_messages(raw if isinstance(raw, list) else [])
-    return tally + sum((tally_message(message) for message in messages), Tally())
+    return tally + sum((tally_message(message) for message in visible(api, messages)), Tally())
 
 
 class Estimator:
@@ -238,22 +237,28 @@ class AnthropicTokenCounter:
         "tools",
         "tool_choice",
         "thinking",
-        "mcp_servers",
+        "extra_headers",
     )
-    BETA_PARAMETERS: ClassVar[tuple[str, ...]] = ("betas", "context_management")
+    BETA_PARAMETERS: ClassVar[tuple[str, ...]] = ("betas", "context_management", "mcp_servers")
+    """Parameters only the beta endpoint takes; a request with any of them is counted there."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def count(self, api: Format, request: Mapping[str, Any]) -> int:
-        """Count a Messages API request, through the beta endpoint when it has ``betas``."""
+        """Count a Messages API request, through the beta endpoint when it uses beta parameters.
+
+        ``extra_headers`` goes along, as it can carry the ``anthropic-beta``
+        header that a compaction block needs.
+        """
         if api is not Format.ANTHROPIC_MESSAGES:
             raise ValueError(
                 f"AnthropicTokenCounter counts {Format.ANTHROPIC_MESSAGES.value} requests"
             )
         params = {key: request[key] for key in self.PARAMETERS if key in request}
-        if "betas" in request:
-            params.update({key: request[key] for key in self.BETA_PARAMETERS if key in request})
+        beta = {key: request[key] for key in self.BETA_PARAMETERS if key in request}
+        if beta:
+            params.update(beta)
             endpoint = self._client.beta.messages.count_tokens
         else:
             endpoint = self._client.messages.count_tokens
@@ -304,8 +309,9 @@ class TiktokenCounter:
             case Format.OPENAI_RESPONSES:
                 raw = data.get("input", [])
                 items = [{"role": "user", "content": raw}] if isinstance(raw, str) else raw
-                messages = openai_responses.parse_items(items if isinstance(items, list) else [])
-                messages = messages[last_compaction(messages) :]
+                messages = visible(
+                    api, openai_responses.parse_items(items if isinstance(items, list) else [])
+                )
                 instructions = data.get("instructions")
                 if isinstance(instructions, str):
                     messages.insert(0, Message.from_text("system", instructions))

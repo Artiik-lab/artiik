@@ -187,8 +187,8 @@ class AnthropicCompactor:
 def restate_after_compaction(pin: str, *, drop_compacted: bool = False) -> Prepare:
     """State the pin again in a developer message right after the latest compaction item.
 
-    With ``drop_compacted``, the input before that item, which the API ignores,
-    isn't sent at all.
+    With ``drop_compacted``, the input before that item, which the docs allow
+    dropping, isn't sent at all.
     """
 
     def prepare(history: Sequence[Message]) -> Sequence[Message]:
@@ -460,7 +460,7 @@ def test_pins_after_server_side_compaction(restate: bool) -> None:
         turns(6, f"{PIN} Check the logs."),
         environment=Environment(output_tokens=300),
         request=request,
-        prepare=restate_after_compaction(PIN) if restate else None,
+        prepare=restate_after_compaction(PIN, drop_compacted=True) if restate else prune,
     )
     compacted = [
         call.index
@@ -474,6 +474,11 @@ def test_pins_after_server_side_compaction(restate: bool) -> None:
     else:
         assert violations
         assert violations[0].call == compacted[0] + 1
+
+
+def prune(history: Sequence[Message]) -> Sequence[Message]:
+    """Send the input from the latest compaction item on, as the docs allow."""
+    return history[last_compaction(history) :]
 
 
 def _output(call: RecordedCall) -> list[JSONObject]:

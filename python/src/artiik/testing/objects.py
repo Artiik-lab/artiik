@@ -46,8 +46,8 @@ class FakeObject:
         """Return a copy of the data, like ``BaseModel.model_dump()``."""
         return copy.deepcopy(self._data)
 
-    def to_dict(self) -> JSONObject:
-        """Return a copy of the data."""
+    def to_dict(self, **_: object) -> JSONObject:
+        """Return a copy of the data, like the SDKs' ``to_dict()``."""
         return copy.deepcopy(self._data)
 
 

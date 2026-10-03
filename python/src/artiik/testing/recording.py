@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
-from artiik.messages import Format, JSONObject, JSONValue, Message, last_compaction
+from artiik.messages import Format, JSONObject, JSONValue, Message, visible
 from artiik.testing.errors import FakeAPIError
 from artiik.testing.tokens import DEFAULT, Tokenizer
 
@@ -93,6 +93,5 @@ def request_tokens(fmt: Format, request: JSONObject, tokenizer: Tokenizer = DEFA
     tool_tokens = (
         sum(tokenizer.count_json(tool) for tool in tools) if isinstance(tools, list) else 0
     )
-    conversation = parse_conversation(fmt, request)
-    messages = parse_system(fmt, request) + conversation[last_compaction(conversation) :]
+    messages = parse_system(fmt, request) + visible(fmt, parse_conversation(fmt, request))
     return tool_tokens + tokenizer.count_messages(messages)

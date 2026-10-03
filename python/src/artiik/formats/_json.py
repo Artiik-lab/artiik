@@ -86,7 +86,10 @@ def plain(value: object) -> object:
 
     The Anthropic and OpenAI SDK models convert with ``to_dict()``, which keeps
     only the fields the API returned. ``model_dump()`` is the fallback; it can
-    add ``null`` fields that some APIs reject when a block is sent back.
+    add ``null`` fields that some APIs reject when a block is sent back. Both
+    run in JSON mode, so dates come out as strings, and without the warnings
+    pydantic gives for data the SDK types don't describe exactly, such as the
+    user messages ``/responses/compact`` returns.
     """
     if isinstance(value, Mapping):
         mapping = cast("Mapping[object, object]", value)
@@ -97,7 +100,11 @@ def plain(value: object) -> object:
     for name in ("to_dict", "model_dump"):
         method = getattr(value, name, None)
         if callable(method):
-            return plain(method())
+            try:
+                data = method(mode="json", warnings=False)
+            except TypeError:
+                data = method()
+            return plain(data)
     return value
 
 

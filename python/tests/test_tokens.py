@@ -126,13 +126,17 @@ def test_tally_request_counts_what_the_model_reads() -> None:
         "instructions": "Be brief.",
         "input": [
             {"role": "user", "content": "Long ago."},
+            {"type": "function_call", "call_id": "c1", "name": "ls", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "a.txt"},
             {"id": "cmp_1", "type": "compaction", "encrypted_content": "x"},
             {"role": "user", "content": "Hi"},
         ],
     }
     item = Compaction(data={"id": "cmp_1", "type": "compaction", "encrypted_content": "x"})
+    # The compaction item stands in for the items before it, except the user messages.
     assert tally_request(RESPONSES, compacted) == (
         tally_message(Message.from_text("system", "Be brief."))
+        + tally_message(Message.from_text("user", "Long ago."))
         + tally_message(Message(role="assistant", blocks=(item,)))
         + tally_message(Message.from_text("user", "Hi"))
     )
@@ -307,6 +311,14 @@ def test_the_anthropic_counter_matches_what_the_api_counts() -> None:
     beta = {**request, "betas": [COMPACTION_BETA]}
     assert counter.count(ANTHROPIC, beta) == count
     assert fake.count_requests[1]["betas"] == [COMPACTION_BETA]
+    # The beta header can come through extra_headers, as a compaction block needs.
+    headers: JSONObject = {**request, "extra_headers": {"anthropic-beta": COMPACTION_BETA}}
+    assert counter.count(ANTHROPIC, headers) == count
+    assert fake.count_requests[2]["extra_headers"] == {"anthropic-beta": COMPACTION_BETA}
+    # Only the beta endpoint takes context_management; the plain one would raise.
+    managed: JSONObject = {**headers, "context_management": {"edits": []}}
+    assert counter.count(ANTHROPIC, managed) == count
+    assert fake.count_requests[3]["context_management"] == {"edits": []}
     with pytest.raises(ValueError, match="anthropic-messages"):
         counter.count(CHAT, request)
 

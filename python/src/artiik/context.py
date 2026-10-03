@@ -34,17 +34,36 @@ doesn't change.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import logging
 import math
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+from artiik.compaction import (
+    ANTHROPIC_BETA,
+    ANTHROPIC_THRESHOLD_BETA,
+    CompactionJob,
+    CompactionResult,
+    Compactor,
+    add_beta,
+)
 from artiik.errors import BudgetError
 from artiik.formats import anthropic_messages, openai_chat, openai_responses
 from artiik.formats._json import expect_list, expect_object, plain, to_json, to_object
 from artiik.guard import Trim, trim
-from artiik.messages import Compaction, Format, JSONObject, JSONValue, Message, Opaque, ToolUse
+from artiik.messages import (
+    Compaction,
+    Format,
+    JSONObject,
+    JSONValue,
+    Message,
+    Opaque,
+    ToolUse,
+    last_compaction,
+)
 from artiik.tokens import (
     Estimator,
     Tally,
@@ -54,8 +73,9 @@ from artiik.tokens import (
     tally_message,
 )
 from artiik.trace import Trace
+from artiik.turns import Unit, group, segment
 from artiik.usage import Usage, read_usage
-from artiik.validation import validate, visible_start
+from artiik.validation import is_turn_start, problems, validate
 
 logger = logging.getLogger("artiik")
 
@@ -75,7 +95,15 @@ _SYSTEM_KEY: Mapping[Format, str] = {
     Format.OPENAI_RESPONSES: "instructions",
     Format.OPENAI_CHAT: "system",
 }
+COMPACT_AT = 0.75
+"""Without ``compact_at``, a context with a budget compacts at this fraction of it."""
+
+MAX_BREAKPOINTS = 4
+"""The most cache breakpoints an Anthropic request may carry."""
+
 _GUARD_ROUNDS = 3
+_COMPACTION_PAUSE = 3
+"""Requests to wait, after a compaction that didn't work, before trying again."""
 
 
 @dataclass(frozen=True)
@@ -84,7 +112,6 @@ class _Sent:
 
     request: int
     entries: int
-    start: int
     fixed: Tally
     total: Tally
     model: str
@@ -95,7 +122,6 @@ class _Base:
     """A provider count of the conversation so far, to build the next estimate on."""
 
     entries: int
-    start: int
     tokens: int
     fixed: Tally
     model: str
@@ -113,6 +139,9 @@ class Context:
     - ``budget`` caps the prompt of every request, in tokens. When a request
       would go over, the guard drops the oldest turns until it fits
       ``trim_to`` of the budget, and logs what it did.
+    - ``compaction`` summarizes the older history when a request would pass
+      ``compact_at`` tokens, three quarters of the budget by default. See
+      :mod:`artiik.compaction` for the strategies.
     - ``estimator`` sizes requests before they're sent; ``counter`` makes the
       sizes exact near the budget, at the cost of a count per request.
     - ``trace`` records what the context does.
@@ -130,6 +159,8 @@ class Context:
         estimator: Estimator | None = None,
         counter: TokenCounter | None = None,
         trim_to: float = 0.8,
+        compaction: Compactor | None = None,
+        compact_at: int | None = None,
         trace: Trace | None = None,
     ) -> None:
         self.api = _api(api)
@@ -138,6 +169,8 @@ class Context:
         if not 0 < trim_to <= 1:
             raise ValueError(f"trim_to must be above 0 and at most 1, got {trim_to}")
         _check_params(self.api, params or {})
+        self.compaction = compaction
+        self.compact_at = _compact_at(self.api, compaction, compact_at, budget)
         self.model = model
         self.budget = budget
         self.system = _system(self.api, system)
@@ -153,6 +186,7 @@ class Context:
         self._requests = 0
         self._sent: _Sent | None = None
         self._base: _Base | None = None
+        self._compaction_paused_until: int | None = None
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -195,15 +229,16 @@ class Context:
         validate(self.api, self._history)
         fixed = self._fixed(system, tools)
         size = self._size(fixed, model)
+        if self._should_compact(size, request):
+            self._compact(request, model, (system, tools, merged), fixed, size)
+            size = self._size(fixed, model)
         if self.budget is not None:
             size = self._fit(request, size, fixed, model, (system, tools, merged))
-        start = visible_start(self.api, self._history)
         self._sent = _Sent(
             request=request,
             entries=len(self._history),
-            start=start,
             fixed=fixed,
-            total=fixed + sum(self._tallies[start:], Tally()),
+            total=fixed + sum(self._tallies, Tally()),
             model=model,
         )
         self.trace.emit(
@@ -235,7 +270,6 @@ class Context:
             self.estimator.observe(sent.total, usage.input_tokens, api=self.api, model=sent.model)
             self._base = _Base(
                 entries=sent.entries,
-                start=sent.start,
                 tokens=usage.input_tokens,
                 fixed=sent.fixed,
                 model=sent.model,
@@ -244,6 +278,8 @@ class Context:
             self._base = None
         for reply in replies:
             self._append(reply)
+        if compacted:
+            self._drop_compacted(sent.request if sent is not None else self._requests - 1)
         self.last_usage = usage
         self.trace.emit(
             "record",
@@ -269,6 +305,29 @@ class Context:
         system = _system(self.api, params.get(_SYSTEM_KEY[self.api], self.system))
         tools = _tools(params.get("tools", self.tools))
         return self._size(self._fixed(system, tools), model)
+
+    def compact(self, **params: Any) -> CompactionResult | None:
+        """Compact now, whatever the conversation's size.
+
+        ``params`` can override ``model``, the system prompt and ``tools``, as
+        in :meth:`prepare`. Returns the outcome, or ``None`` when there was
+        nothing to summarize. Only strategies that compact on the client side
+        can be forced.
+        """
+        if self.compaction is None or not self.compaction.active:
+            raise ValueError("compact() needs a compaction strategy that runs on the client side")
+        _check_params(self.api, params)
+        merged = {**self.params, **params}
+        model = merged.pop("model", self.model)
+        if not isinstance(model, str) or not model:
+            raise TypeError("compact() needs a model: pass model= to the Context or here")
+        system = _system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system))
+        tools = _tools(merged.pop("tools", self.tools))
+        validate(self.api, self._history)
+        fixed = self._fixed(system, tools)
+        return self._compact(
+            self._requests, model, (system, tools, merged), fixed, self._size(fixed, model)
+        )
 
     def pending_tool_calls(self) -> list[ToolUse]:
         """The tool calls in the conversation that have no result yet, oldest first."""
@@ -300,21 +359,238 @@ class Context:
 
     def _size(self, fixed: Tally, model: str) -> int:
         """A conservative size of the request: the last count plus an estimate of what's new."""
-        start = visible_start(self.api, self._history)
         base = self._base
         if (
             base is not None
             and base.model == model
             and base.fixed == fixed
-            and base.start == start
             and base.entries <= len(self._history)
         ):
             added = sum(self._tallies[base.entries :], Tally())
             return base.tokens + self._scaled(added, model)
-        return self._scaled(fixed + sum(self._tallies[start:], Tally()), model)
+        return self._scaled(fixed + sum(self._tallies, Tally()), model)
 
     def _scaled(self, tally: Tally, model: str) -> int:
         return math.ceil(self.estimator.estimate(tally, api=self.api, model=model) * SAFETY)
+
+    def _should_compact(self, size: int, request: int) -> bool:
+        return (
+            self.compaction is not None
+            and self.compaction.active
+            and self.compact_at is not None
+            and size > self.compact_at
+            and (self._compaction_paused_until is None or request >= self._compaction_paused_until)
+        )
+
+    def _compact(
+        self,
+        request: int,
+        model: str,
+        parts: tuple[JSONValue, list[JSONValue] | None, dict[str, Any]],
+        fixed: Tally,
+        size: int,
+    ) -> CompactionResult | None:
+        """Summarize the history before the part kept word for word, and swap the summary in."""
+        compaction = cast(Compactor, self.compaction)
+        name = type(compaction).__name__
+        plan = self._plan(model, fixed, keeps_users=compaction.keeps_user_messages)
+        if plan is None:
+            self.trace.emit(
+                "compaction",
+                request,
+                strategy=name,
+                outcome="nothing to summarize",
+                tokens_before=size,
+            )
+            return None
+        cut, boundaries = plan
+        system, tools, params = parts
+        job = CompactionJob(
+            api=self.api,
+            model=model,
+            messages=tuple(self._history[:cut]),
+            boundaries=boundaries,
+            system=system,
+            tools=tuple(tools) if tools is not None else None,
+            params=params,
+        )
+        result = compaction.compact(job)
+        usage = result.usage
+        details: dict[str, JSONValue] = {
+            "strategy": name,
+            "outcome": result.outcome,
+            "attempts": result.attempts,
+            "tokens_before": size,
+            "input_tokens": usage.input_tokens if usage is not None else 0,
+            "output_tokens": usage.output_tokens if usage is not None else 0,
+        }
+        if result.messages is None:
+            self._failed(request, details, retry=result.retry)
+            return result
+        summarized = result.summarized if result.summarized is not None else len(job.messages)
+        carried = [index for index in range(summarized) if _is_instruction(self._history[index])]
+        order = self._kept_order(summarized, carried)
+        replacement = list(result.messages)
+        history = replacement + [self._history[index] for index in order]
+        found = problems(self.api, history)
+        if found:
+            # A strategy's bug: keep the conversation as it was rather than send it broken.
+            details["outcome"] = "invalid result"
+            details["problems"] = list(found)
+            self._failed(request, details, retry=False, found=found)
+            return result
+        self._history = history
+        self._tallies = [tally_message(message) for message in replacement] + [
+            self._tallies[index] for index in order
+        ]
+        self._base = None
+        after = self._size(fixed, model)
+        compact_at = cast(int, self.compact_at)
+        self._compaction_paused_until = request + _COMPACTION_PAUSE if after > compact_at else None
+        self.trace.emit(
+            "compaction",
+            request,
+            **details,
+            summarized_messages=summarized,
+            kept_messages=len(order) - len(carried),
+            moved_messages=len(carried),
+            tokens_after=after,
+        )
+        logger.info(
+            "artiik compaction: %s summarized %d messages before request %d (about %d tokens, "
+            "now about %d)",
+            name,
+            summarized,
+            request,
+            size,
+            after,
+        )
+        if after > compact_at:
+            logger.warning(
+                "artiik compaction: request %d is still above compact_at (%d tokens) after "
+                "compaction; the next try waits %d requests",
+                request,
+                compact_at,
+                _COMPACTION_PAUSE,
+            )
+        return result
+
+    def _failed(
+        self,
+        request: int,
+        details: dict[str, JSONValue],
+        *,
+        retry: bool,
+        found: Sequence[str] = (),
+    ) -> None:
+        """Trace and log a compaction that didn't happen, and wait before trying again."""
+        self._compaction_paused_until = request + _COMPACTION_PAUSE if retry else sys.maxsize
+        self.trace.emit("compaction", request, **details)
+        logger.log(
+            logging.ERROR if found else logging.WARNING,
+            "artiik compaction: %s didn't compact before request %d: %s%s",
+            details["strategy"],
+            request,
+            details["outcome"],
+            "".join(f"; {problem}" for problem in found),
+        )
+
+    def _plan(
+        self, model: str, fixed: Tally, *, keeps_users: bool
+    ) -> tuple[int, tuple[int, ...]] | None:
+        """Where to cut: keep the current turn, or its latest steps when it's too long.
+
+        Returns the position of the first message kept word for word, and the
+        positions in the summarized part where a shorter summary could end.
+        The summarized part is cut shorter if its compaction request wouldn't
+        fit the budget. ``keeps_users`` is for a strategy that keeps user
+        messages word for word: a part made only of them has nothing for it to
+        summarize.
+        """
+        units = segment(self.api, self._history)
+        turns = group(units)
+        if not turns:
+            return None
+        limit = cast(int, self.compact_at) // 2
+        last = turns[-1]
+
+        def size_of(indices: Sequence[int]) -> int:
+            return self._scaled(sum((self._tallies[index] for index in indices), Tally()), model)
+
+        steps = [unit for unit in last if unit.kind == "step"]
+        whole = [index for unit in last for index in unit.indices]
+        if last[0].kind == "user" and (not steps or size_of(whole) <= limit):
+            cut = last[0].indices[0]
+        elif steps:
+            cut = steps[-1].indices[0]
+            kept = size_of(steps[-1].indices)
+            for unit in reversed(steps[:-1]):
+                kept += size_of(unit.indices)
+                if kept > limit:
+                    break
+                cut = unit.indices[0]
+        else:
+            cut = last[0].indices[0]
+        summarized = [unit for unit in units if unit.indices[0] < cut]
+        if self.budget is not None:
+            summarized = self._fitting(summarized, fixed, model)
+        untouched = {"anchor", "instruction", "user"} if keeps_users else {"anchor", "instruction"}
+        if all(unit.kind in untouched for unit in summarized):
+            return None
+        boundaries = tuple(
+            unit.indices[0] for unit in summarized[1:] if unit.kind in ("user", "step")
+        )
+        return summarized[-1].indices[-1] + 1, boundaries
+
+    def _fitting(self, units: Sequence[Unit], fixed: Tally, model: str) -> list[Unit]:
+        """The longest run of units from the first whose compaction request fits the budget."""
+        budget = cast(int, self.budget)
+        total = fixed
+        for position, unit in enumerate(units):
+            total = total + sum((self._tallies[index] for index in unit.indices), Tally())
+            if self._scaled(total, model) > budget:
+                return list(units[:position])
+        return list(units)
+
+    def _kept_order(self, end: int, carried: Sequence[int]) -> list[int]:
+        """The kept messages, with the carried instructions after the first user turn among them."""
+        kept = list(range(end, len(self._history)))
+        if not carried:
+            return kept
+        for position, index in enumerate(kept):
+            if is_turn_start(self._history[index]):
+                return [*kept[: position + 1], *carried, *kept[position + 1 :]]
+        return [*carried, *kept]
+
+    def _drop_compacted(self, request: int) -> None:
+        """Drop what a compaction block or item that came back in a reply replaced."""
+        before = len(self._history)
+        if self.api is Format.OPENAI_RESPONSES:
+            start = last_compaction(self._history)
+            self._history = self._history[start:]
+            self._tallies = self._tallies[start:]
+        else:
+            position = max(
+                index
+                for index, message in enumerate(self._history)
+                if any(isinstance(block, Compaction) for block in message.blocks)
+            )
+            message = self._history[position]
+            first = max(
+                index for index, block in enumerate(message.blocks) if isinstance(block, Compaction)
+            )
+            if first:
+                message = dataclasses.replace(message, blocks=message.blocks[first:])
+            self._history = [message, *self._history[position + 1 :]]
+            self._tallies = [tally_message(message), *self._tallies[position + 1 :]]
+        self._base = None
+        self.trace.emit(
+            "compaction",
+            request,
+            strategy="provider",
+            outcome="compacted",
+            summarized_messages=before - len(self._history),
+        )
 
     def _fit(
         self,
@@ -371,12 +647,9 @@ class Context:
         counter = cast(TokenCounter, self.counter)
         system, tools, params = parts
         exact = counter.count(self.api, self._build(model, system, tools, params))
-        start = visible_start(self.api, self._history)
-        total = fixed + sum(self._tallies[start:], Tally())
+        total = fixed + sum(self._tallies, Tally())
         self.estimator.observe(total, exact, api=self.api, model=model)
-        self._base = _Base(
-            entries=len(self._history), start=start, tokens=exact, fixed=fixed, model=model
-        )
+        self._base = _Base(entries=len(self._history), tokens=exact, fixed=fixed, model=model)
         return exact
 
     def _guard_event(
@@ -451,7 +724,42 @@ class Context:
                 )
                 request["messages"] = prefix + openai_chat.dump_messages(self._history)
         request.update(copy.deepcopy(dict(params)))
+        if self.compaction is not None:
+            self.compaction.configure(self.api, request, self.compact_at or 0)
+        if self.api is Format.ANTHROPIC_MESSAGES:
+            self._mark_compaction(request)
         return request
+
+    def _mark_compaction(self, request: dict[str, Any]) -> None:
+        """Send the beta headers the history's compaction blocks need, and cache after the block.
+
+        Anthropic wants the beta header on every request that carries a
+        compaction block, and a ``cache_control`` breakpoint on the block
+        caches the summary.
+        """
+        blocks = [
+            block
+            for message in self._history
+            for block in message.blocks
+            if isinstance(block, Compaction)
+        ]
+        for block in blocks:
+            add_beta(
+                request, ANTHROPIC_BETA if "signature" in block.data else ANTHROPIC_THRESHOLD_BETA
+            )
+        messages = request.get("messages")
+        if not blocks or not isinstance(messages, list) or not messages:
+            return
+        first = cast("list[JSONObject]", messages)[0].get("content")
+        if not isinstance(first, list) or not first or not isinstance(first[0], dict):
+            return
+        block = first[0]
+        if (
+            block.get("type") == "compaction"
+            and "cache_control" not in block
+            and _breakpoints(request) < MAX_BREAKPOINTS
+        ):
+            block["cache_control"] = {"type": "ephemeral"}
 
 
 def _api(api: Format | str) -> Format:
@@ -545,3 +853,46 @@ def _stop_reason(api: Format, data: JSONObject) -> JSONValue:
             if isinstance(choices, list) and choices and isinstance(choices[0], dict):
                 return choices[0].get("finish_reason")
             return None
+
+
+def _compact_at(
+    api: Format, compaction: Compactor | None, compact_at: int | None, budget: int | None
+) -> int | None:
+    """Check the compaction settings, and work out the threshold."""
+    if compact_at is not None and compact_at <= 0:
+        raise ValueError(f"compact_at must be a positive number of tokens, got {compact_at}")
+    if compact_at is not None and budget is not None and compact_at > budget:
+        raise ValueError(f"compact_at ({compact_at}) can't be above the budget ({budget})")
+    if compaction is None:
+        return compact_at
+    if compaction.apis is not None and api not in compaction.apis:
+        raise ValueError(f"{type(compaction).__name__} doesn't work with the {api.value} API")
+    if compact_at is None and budget is not None:
+        compact_at = int(budget * COMPACT_AT)
+    if compact_at is None and (compaction.active or compaction.threshold is None):
+        raise ValueError("compaction needs compact_at, or a budget to work it out from")
+    if not compaction.active:
+        compaction.configure(api, {}, compact_at or 0)
+    return compact_at
+
+
+def _is_instruction(message: Message) -> bool:
+    return not message.bare_item and message.role in ("system", "developer")
+
+
+def _breakpoints(request: Mapping[str, Any]) -> int:
+    """The cache breakpoints of an Anthropic request."""
+    count = 1 if "cache_control" in request else 0
+    for key in ("tools", "system", "messages"):
+        count += _cache_controls(request.get(key))
+    return count
+
+
+def _cache_controls(value: object) -> int:
+    if isinstance(value, Mapping):
+        fields = cast("Mapping[str, object]", value)
+        own = 1 if "cache_control" in fields else 0
+        return own + _cache_controls(fields.get("content"))
+    if isinstance(value, list):
+        return sum(_cache_controls(item) for item in cast("list[object]", value))
+    return 0
