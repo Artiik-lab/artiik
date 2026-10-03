@@ -47,6 +47,19 @@ def message(role: str, *blocks: JSONObject) -> JSONObject:
     return {"role": role, "content": content}
 
 
+def system(text: str) -> JSONObject:
+    return {"role": "system", "content": text}
+
+
+SERVER_SEARCH: JSONObject = {
+    "role": "assistant",
+    "content": [
+        {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "x"}},
+        {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []},
+    ],
+}
+
+
 COMPACTION: JSONObject = {"type": "compaction", "content": "Summary.", "signature": "sig"}
 TOOL_USE: JSONObject = {"type": "tool_use", "id": "a", "name": "ls", "input": {"path": "."}}
 TOOL_RESULT: JSONObject = {"type": "tool_result", "tool_use_id": "a", "content": "ok"}
@@ -78,6 +91,18 @@ THINKING: JSONObject = {"type": "thinking", "thinking": "x", "signature": "s"}
             id="compaction-in-user-message",
         ),
         pytest.param([user("Hi"), message("assistant")], id="empty-prefill"),
+        pytest.param(
+            [user("Plan it."), system("Never touch prod."), system("Use stg-3.")],
+            id="consecutive-system-messages",
+        ),
+        pytest.param(
+            [user("Go"), tool_use("a"), results("a"), system("Use stg-3."), message("assistant")],
+            id="system-after-tool-results",
+        ),
+        pytest.param(
+            [user("Search."), SERVER_SEARCH, system("Cite your sources.")],
+            id="system-after-server-tool-result",
+        ),
     ],
 )
 def test_valid_anthropic_conversations(messages: list[JSONObject]) -> None:
@@ -162,6 +187,29 @@ def test_valid_anthropic_conversations(messages: list[JSONObject]) -> None:
             [message("user"), user("Go")],
             "messages[0]: the content is empty",
             id="empty-content",
+        ),
+        pytest.param(
+            [system("Be brief."), user("Go")],
+            "messages[0]: a system message can't come first; use the system parameter",
+            id="system-first",
+        ),
+        pytest.param(
+            [user("Go"), {"role": "assistant", "content": "Done."}, system("Be brief.")],
+            "messages[2]: a system message must follow a user turn",
+            id="system-after-reply",
+        ),
+        pytest.param(
+            [user("Go"), system("Be brief."), user("Next.")],
+            "messages[1]: a system message must come before an assistant turn or last",
+            id="system-before-user",
+        ),
+        pytest.param(
+            [
+                user("Go"),
+                message("system", {"type": "text", "text": "A.", "cache_control": {"type": "x"}}),
+            ],
+            "messages[1].content[0]: a system message's blocks can't carry cache_control",
+            id="system-cache-control",
         ),
     ],
 )

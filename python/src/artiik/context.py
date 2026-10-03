@@ -40,7 +40,7 @@ import math
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from artiik.compaction import (
     ANTHROPIC_BETA,
@@ -61,8 +61,23 @@ from artiik.messages import (
     JSONValue,
     Message,
     Opaque,
+    Role,
     ToolUse,
     last_compaction,
+)
+from artiik.pins import (
+    PIN_BUDGET,
+    USER_LABEL,
+    Ledger,
+    Pin,
+    PinKind,
+    PinSource,
+    Restatement,
+    approx_tokens,
+    check_pin,
+    kept_in,
+    render_pins,
+    restatement,
 )
 from artiik.tokens import (
     Estimator,
@@ -75,7 +90,7 @@ from artiik.tokens import (
 from artiik.trace import Trace
 from artiik.turns import Unit, group, segment
 from artiik.usage import Usage, read_usage
-from artiik.validation import is_turn_start, problems, validate
+from artiik.validation import problems, validate
 
 logger = logging.getLogger("artiik")
 
@@ -105,6 +120,43 @@ _GUARD_ROUNDS = 3
 _COMPACTION_PAUSE = 3
 """Requests to wait, after a compaction that didn't work, before trying again."""
 
+_PIN_ROLES: Mapping[Format, tuple[Role, ...]] = {
+    Format.ANTHROPIC_MESSAGES: ("system", "user"),
+    Format.OPENAI_RESPONSES: ("developer", "system", "user"),
+    Format.OPENAI_CHAT: ("developer", "system", "user"),
+}
+"""The roles pin messages can take in each format; the first is the default."""
+
+
+@dataclass(frozen=True)
+class _Outgoing:
+    """Messages artiik adds at the end of the next request, and what they deliver.
+
+    They join the history when the reply is recorded, so a request that fails
+    leaves nothing behind in the wrong place.
+    """
+
+    messages: tuple[Message, ...] = ()
+    own: tuple[Message, ...] = ()
+    """The pin messages among them."""
+    pins: tuple[str, ...] = ()
+    """The new pins they deliver."""
+    retractions: tuple[str, ...] = ()
+    """The pins they say no longer apply."""
+    carried: int = 0
+    """How many instructions from a summarized part they send again."""
+    restated: bool = False
+    """Whether they restate everything after a compaction."""
+    restatement: Restatement | None = None
+
+
+@dataclass(frozen=True)
+class _Restate:
+    """A compaction happened: restate the pins and the ledger after the next user turn."""
+
+    summary: str | None
+    """The summary's text, to check the pins against, when it's readable."""
+
 
 @dataclass(frozen=True)
 class _Sent:
@@ -115,16 +167,22 @@ class _Sent:
     fixed: Tally
     total: Tally
     model: str
+    outgoing: _Outgoing
 
 
 @dataclass(frozen=True)
 class _Base:
-    """A provider count of the conversation so far, to build the next estimate on."""
+    """A provider count of the conversation so far, to build the next estimate on.
+
+    ``extra`` is the part of the count made of messages that weren't in the
+    history yet, such as a pending pin message.
+    """
 
     entries: int
     tokens: int
     fixed: Tally
     model: str
+    extra: Tally = dataclasses.field(default_factory=Tally)
 
 
 class Context:
@@ -142,6 +200,11 @@ class Context:
     - ``compaction`` summarizes the older history when a request would pass
       ``compact_at`` tokens, three quarters of the budget by default. See
       :mod:`artiik.compaction` for the strategies.
+    - Pins (:meth:`pin`) and the ``ledger`` of the files and IDs the tools
+      used are restated after every compaction, in ``pin_role`` messages: a
+      system message for Anthropic and a developer message for OpenAI by
+      default, or ``"user"`` for models without them. ``pin_budget`` caps
+      their size, in tokens. See :mod:`artiik.pins`.
     - ``estimator`` sizes requests before they're sent; ``counter`` makes the
       sizes exact near the budget, at the cost of a count per request.
     - ``trace`` records what the context does.
@@ -161,6 +224,9 @@ class Context:
         trim_to: float = 0.8,
         compaction: Compactor | None = None,
         compact_at: int | None = None,
+        pin_role: Literal["system", "developer", "user"] | None = None,
+        pin_budget: int = PIN_BUDGET,
+        ledger: Ledger | None = None,
         trace: Trace | None = None,
     ) -> None:
         self.api = _api(api)
@@ -169,8 +235,13 @@ class Context:
         if not 0 < trim_to <= 1:
             raise ValueError(f"trim_to must be above 0 and at most 1, got {trim_to}")
         _check_params(self.api, params or {})
+        if pin_budget <= 0:
+            raise ValueError(f"pin_budget must be a positive number of tokens, got {pin_budget}")
         self.compaction = compaction
         self.compact_at = _compact_at(self.api, compaction, compact_at, budget)
+        self.pin_role: Role = _pin_role(self.api, pin_role)
+        self.pin_budget = pin_budget
+        self.ledger = ledger if ledger is not None else Ledger()
         self.model = model
         self.budget = budget
         self.system = _system(self.api, system)
@@ -187,10 +258,27 @@ class Context:
         self._sent: _Sent | None = None
         self._base: _Base | None = None
         self._compaction_paused_until: int | None = None
+        self._pins: dict[str, Pin] = {}
+        self._pin_count = 0
+        self._startup: tuple[Pin, ...] | None = None
+        """The pins in the system prompt, fixed at the first request."""
+        self._new: list[Pin] = []
+        self._retracting: list[Pin] = []
+        self._retired: list[Pin] = []
+        """Unpinned pins that stay in the system prompt."""
+        self._restate: _Restate | None = None
+        self._carried: list[Message] = []
+        self._own: dict[int, Message] = {}
+        """The pin messages in the history, by identity."""
+        self._outgoing = _Outgoing()
 
     @property
     def history(self) -> tuple[Message, ...]:
-        """The managed conversation, in the neutral model."""
+        """The managed conversation, in the neutral model.
+
+        Messages artiik adds at the end of a request, such as pin messages,
+        join it when the reply is recorded.
+        """
         return tuple(self._history)
 
     def add(self, *entries: object) -> None:
@@ -214,33 +302,42 @@ class Context:
         ``params`` are request parameters, merged over the context's own. The
         conversation itself can't be passed here; add messages with :meth:`add`.
         The context checks that the conversation is a valid request, raising
-        :class:`~artiik.errors.ValidationError` if it isn't, and lets the guard
-        trim it when it would go over the budget.
+        :class:`~artiik.errors.ValidationError` if it isn't, compacts it past
+        ``compact_at``, and lets the guard trim it when it would go over the
+        budget. Pin messages and restatements go at the end, after the latest
+        user turn.
         """
         _check_params(self.api, params)
         merged = {**self.params, **params}
         model = merged.pop("model", self.model)
         if not isinstance(model, str) or not model:
             raise TypeError("prepare() needs a model: pass model= to the Context or to prepare()")
-        system = _system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system))
+        if self._startup is None:
+            self._startup = tuple(self._pins.values())
+        system = self._with_pins(_system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system)))
         tools = _tools(merged.pop("tools", self.tools))
         request = self._requests
         self._requests += 1
         validate(self.api, self._history)
         fixed = self._fixed(system, tools)
+        self._outgoing = self._next_outgoing()
         size = self._size(fixed, model)
         if self._should_compact(size, request):
             self._compact(request, model, (system, tools, merged), fixed, size)
+            self._outgoing = self._next_outgoing()
             size = self._size(fixed, model)
         if self.budget is not None:
             size = self._fit(request, size, fixed, model, (system, tools, merged))
+        outgoing = self._outgoing
         self._sent = _Sent(
             request=request,
             entries=len(self._history),
             fixed=fixed,
-            total=fixed + sum(self._tallies, Tally()),
+            total=fixed + sum(self._tallies, Tally()) + _tally(outgoing.messages),
             model=model,
+            outgoing=outgoing,
         )
+        self._trace_outgoing(request, outgoing)
         self.trace.emit(
             "prepare",
             request,
@@ -263,13 +360,19 @@ class Context:
         replies = _replies(self.api, data)
         usage = read_usage(self.api, data)
         sent, self._sent = self._sent, None
+        in_place = sent is not None and len(self._history) == sent.entries
+        # Without a reply, the messages artiik added stay pending: a system message
+        # can't stand before the next user turn.
+        committed = sent is not None and bool(replies)
+        if sent is not None and replies:
+            self._commit(sent.outgoing)
         compacted = any(
             isinstance(block, Compaction) for reply in replies for block in reply.blocks
         )
-        if sent is not None and usage.input_tokens > 0 and not compacted:
+        if sent is not None and committed and in_place and usage.input_tokens > 0 and not compacted:
             self.estimator.observe(sent.total, usage.input_tokens, api=self.api, model=sent.model)
             self._base = _Base(
-                entries=sent.entries,
+                entries=len(self._history),
                 tokens=usage.input_tokens,
                 fixed=sent.fixed,
                 model=sent.model,
@@ -279,7 +382,7 @@ class Context:
         for reply in replies:
             self._append(reply)
         if compacted:
-            self._drop_compacted(sent.request if sent is not None else self._requests - 1)
+            self._drop_compacted(sent.request if sent is not None else self._requests - 1, replies)
         self.last_usage = usage
         self.trace.emit(
             "record",
@@ -302,8 +405,9 @@ class Context:
         model = params.get("model", self.model)
         if not isinstance(model, str) or not model:
             raise TypeError("estimate() needs a model: pass model= to the Context or here")
-        system = _system(self.api, params.get(_SYSTEM_KEY[self.api], self.system))
+        system = self._with_pins(_system(self.api, params.get(_SYSTEM_KEY[self.api], self.system)))
         tools = _tools(params.get("tools", self.tools))
+        self._outgoing = self._next_outgoing()
         return self._size(self._fixed(system, tools), model)
 
     def compact(self, **params: Any) -> CompactionResult | None:
@@ -321,13 +425,79 @@ class Context:
         model = merged.pop("model", self.model)
         if not isinstance(model, str) or not model:
             raise TypeError("compact() needs a model: pass model= to the Context or here")
-        system = _system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system))
+        system = self._with_pins(_system(self.api, merged.pop(_SYSTEM_KEY[self.api], self.system)))
         tools = _tools(merged.pop("tools", self.tools))
         validate(self.api, self._history)
         fixed = self._fixed(system, tools)
+        self._outgoing = self._next_outgoing()
         return self._compact(
             self._requests, model, (system, tools, merged), fixed, self._size(fixed, model)
         )
+
+    def pin(
+        self, text: str, *, kind: PinKind = "constraint", source: PinSource = "operator"
+    ) -> Pin:
+        """Keep a text in front of the model, through every compaction.
+
+        ``kind`` is ``constraint``, ``decision``, ``goal`` or ``fact``;
+        ``source`` is ``operator``, ``user`` or ``tool``. A pin set before the
+        first request goes at the end of the system prompt. A later one goes in
+        a message after the latest user turn on the next request, so the
+        cached prefix doesn't change. After every compaction, one message
+        restates all the active pins and the ledger. Returns the pin; pass it
+        or its ``id`` to :meth:`unpin`.
+        """
+        check_pin(text, kind, source)
+        self._pin_count += 1
+        pin = Pin(id=f"pin-{self._pin_count}", text=text.strip(), kind=kind, source=source)
+        self._pins[pin.id] = pin
+        if self._startup is not None:
+            self._new.append(pin)
+        self.trace.emit(
+            "pins",
+            self._requests,
+            action="pin",
+            id=pin.id,
+            kind=kind,
+            source=source,
+            placement="message" if self._startup is not None else "system prompt",
+        )
+        size = approx_tokens(render_pins(tuple(self._pins.values()), "Pinned context:"))
+        if size > self.pin_budget:
+            self.trace.emit(
+                "pins", self._requests, action="over budget", tokens=size, budget=self.pin_budget
+            )
+            logger.warning(
+                "artiik pins: the active pins take about %d tokens, over the pin budget of %d; "
+                "they're all kept, so keep pins short",
+                size,
+                self.pin_budget,
+            )
+        return pin
+
+    def unpin(self, pin: Pin | str) -> None:
+        """Retire a pin: later restatements leave it out.
+
+        If the model has already seen it, the next request says it no longer
+        applies. A pin in the system prompt stays there, because the system
+        prompt doesn't change after the first request, so restatements list it
+        as no longer in force.
+        """
+        key = pin.id if isinstance(pin, Pin) else pin
+        found = self._pins.pop(key, None)
+        if found is None:
+            raise ValueError(f"no active pin {key!r}")
+        if found in self._new:
+            self._new.remove(found)
+        elif self._startup is not None:
+            self._retracting.append(found)
+            if found in self._startup:
+                self._retired.append(found)
+        self.trace.emit("pins", self._requests, action="unpin", id=found.id)
+
+    def pins(self) -> tuple[Pin, ...]:
+        """The active pins, oldest first."""
+        return tuple(self._pins.values())
 
     def pending_tool_calls(self) -> list[ToolUse]:
         """The tool calls in the conversation that have no result yet, oldest first."""
@@ -341,6 +511,8 @@ class Context:
     def _append(self, message: Message) -> None:
         self._history.append(message)
         self._tallies.append(tally_message(message))
+        for call in message.tool_uses:
+            self.ledger.observe(call)
 
     def _fixed(self, system: JSONValue, tools: list[JSONValue] | None) -> Tally:
         tally = Tally()
@@ -360,15 +532,16 @@ class Context:
     def _size(self, fixed: Tally, model: str) -> int:
         """A conservative size of the request: the last count plus an estimate of what's new."""
         base = self._base
+        extra = _tally(self._outgoing.messages)
         if (
             base is not None
             and base.model == model
             and base.fixed == fixed
             and base.entries <= len(self._history)
         ):
-            added = sum(self._tallies[base.entries :], Tally())
+            added = sum(self._tallies[base.entries :], Tally()) + extra - base.extra
             return base.tokens + self._scaled(added, model)
-        return self._scaled(fixed + sum(self._tallies, Tally()), model)
+        return self._scaled(fixed + sum(self._tallies, Tally()) + extra, model)
 
     def _scaled(self, tally: Tally, model: str) -> int:
         return math.ceil(self.estimator.estimate(tally, api=self.api, model=model) * SAFETY)
@@ -428,10 +601,9 @@ class Context:
             self._failed(request, details, retry=result.retry)
             return result
         summarized = result.summarized if result.summarized is not None else len(job.messages)
-        carried = [index for index in range(summarized) if _is_instruction(self._history[index])]
-        order = self._kept_order(summarized, carried)
         replacement = list(result.messages)
-        history = replacement + [self._history[index] for index in order]
+        kept = self._history[summarized:]
+        history = replacement + kept
         found = problems(self.api, history)
         if found:
             # A strategy's bug: keep the conversation as it was rather than send it broken.
@@ -439,11 +611,14 @@ class Context:
             details["problems"] = list(found)
             self._failed(request, details, retry=False, found=found)
             return result
+        carried = self._release(self._history[:summarized])
         self._history = history
-        self._tallies = [tally_message(message) for message in replacement] + [
-            self._tallies[index] for index in order
+        self._tallies = [tally_message(message) for message in replacement] + self._tallies[
+            summarized:
         ]
         self._base = None
+        self._restate = _Restate(summary=result.summary)
+        self._outgoing = self._next_outgoing()
         after = self._size(fixed, model)
         compact_at = cast(int, self.compact_at)
         self._compaction_paused_until = request + _COMPACTION_PAUSE if after > compact_at else None
@@ -452,8 +627,8 @@ class Context:
             request,
             **details,
             summarized_messages=summarized,
-            kept_messages=len(order) - len(carried),
-            moved_messages=len(carried),
+            kept_messages=len(kept),
+            moved_messages=carried,
             tokens_after=after,
         )
         logger.info(
@@ -507,7 +682,7 @@ class Context:
         messages word for word: a part made only of them has nothing for it to
         summarize.
         """
-        units = segment(self.api, self._history)
+        units = segment(self.api, self._history, self._is_own)
         turns = group(units)
         if not turns:
             return None
@@ -534,6 +709,10 @@ class Context:
         summarized = [unit for unit in units if unit.indices[0] < cut]
         if self.budget is not None:
             summarized = self._fitting(summarized, fixed, model)
+        # An instruction must not open the kept part: it would follow the summary
+        # directly, where Anthropic takes no system message. Cut before its turn.
+        while summarized and units[len(summarized)].kind == "instruction":
+            summarized.pop()
         untouched = {"anchor", "instruction", "user"} if keeps_users else {"anchor", "instruction"}
         if all(unit.kind in untouched for unit in summarized):
             return None
@@ -552,21 +731,15 @@ class Context:
                 return list(units[:position])
         return list(units)
 
-    def _kept_order(self, end: int, carried: Sequence[int]) -> list[int]:
-        """The kept messages, with the carried instructions after the first user turn among them."""
-        kept = list(range(end, len(self._history)))
-        if not carried:
-            return kept
-        for position, index in enumerate(kept):
-            if is_turn_start(self._history[index]):
-                return [*kept[: position + 1], *carried, *kept[position + 1 :]]
-        return [*carried, *kept]
-
-    def _drop_compacted(self, request: int) -> None:
+    def _drop_compacted(self, request: int, replies: Sequence[Message]) -> None:
         """Drop what a compaction block or item that came back in a reply replaced."""
         before = len(self._history)
+        blocks = [
+            block for reply in replies for block in reply.blocks if isinstance(block, Compaction)
+        ]
         if self.api is Format.OPENAI_RESPONSES:
             start = last_compaction(self._history)
+            self._release(self._history[:start])
             self._history = self._history[start:]
             self._tallies = self._tallies[start:]
         else:
@@ -581,9 +754,11 @@ class Context:
             )
             if first:
                 message = dataclasses.replace(message, blocks=message.blocks[first:])
+            self._release(self._history[:position])
             self._history = [message, *self._history[position + 1 :]]
             self._tallies = [tally_message(message), *self._tallies[position + 1 :]]
         self._base = None
+        self._restate = _Restate(summary=blocks[-1].summary if blocks else None)
         self.trace.emit(
             "compaction",
             request,
@@ -591,6 +766,155 @@ class Context:
             outcome="compacted",
             summarized_messages=before - len(self._history),
         )
+
+    def _release(self, messages: Sequence[Message]) -> int:
+        """Let go of messages a summary replaces, and return how many instructions are carried.
+
+        Pin messages are restated after the summary. Other system and developer
+        messages are sent again, after the next user turn, because a summary
+        doesn't keep instructions in force.
+        """
+        carried = 0
+        for message in messages:
+            if self._is_own(message):
+                del self._own[id(message)]
+            elif _is_instruction(message):
+                self._carried.append(message)
+                carried += 1
+        return carried
+
+    def _is_own(self, message: Message) -> bool:
+        """Whether a message is a pin message artiik wrote."""
+        return self._own.get(id(message)) is message
+
+    def _with_pins(self, system: JSONValue) -> JSONValue:
+        """The system prompt with the pins set before the first request at its end."""
+        pins = self._startup if self._startup is not None else tuple(self._pins.values())
+        if not pins:
+            return system
+        text = render_pins(pins, "Pinned context:")
+        if system is None:
+            return text
+        if isinstance(system, str):
+            return f"{system}\n\n{text}"
+        block: JSONObject = {"type": "text", "text": text}
+        return [*cast("list[JSONValue]", system), block]
+
+    def _next_outgoing(self) -> _Outgoing:
+        """The messages to add at the end of the next request, once it ends with a user turn.
+
+        Anthropic takes a system message only after a user turn (tool results
+        count), and its compaction docs place restated instructions right after
+        the next one, so that no message lands between kept turns.
+        """
+        if not self._ends_with_user_turn():
+            return _Outgoing()
+        messages = list(self._carried)
+        restated: Restatement | None = None
+        if self._restate is not None:
+            restated = restatement(
+                tuple(self._pins.values()), tuple(self._retired), self.ledger, self.pin_budget
+            )
+            text = restated.text if restated is not None else ""
+        else:
+            sections: list[str] = []
+            if self._new:
+                sections.append(render_pins(self._new, "Pinned context:"))
+            if self._retracting:
+                sections.append(render_pins(self._retracting, "No longer in force:"))
+            text = "\n".join(sections)
+        own: tuple[Message, ...] = ()
+        if text:
+            own = (self._pin_message(text),)
+            messages.extend(own)
+        return _Outgoing(
+            messages=tuple(messages),
+            own=own,
+            pins=tuple(pin.id for pin in self._new),
+            retractions=tuple(pin.id for pin in self._retracting),
+            carried=len(self._carried),
+            restated=self._restate is not None,
+            restatement=restated,
+        )
+
+    def _pin_message(self, text: str) -> Message:
+        if self.pin_role == "user":
+            text = f"{USER_LABEL}\n{text}"
+        return Message.from_text(self.pin_role, text)
+
+    def _ends_with_user_turn(self) -> bool:
+        """Whether the history ends with a user turn, past any system and pin messages."""
+        for message in reversed(self._history):
+            if self._is_own(message) or _is_instruction(message):
+                continue
+            return message.role in ("user", "tool")
+        return False
+
+    def _commit(self, outgoing: _Outgoing) -> None:
+        """Add the messages a recorded request ended with to the history."""
+        for message in outgoing.messages:
+            self._append(message)
+        for message in outgoing.own:
+            self._own[id(message)] = message
+        delivered = set(outgoing.pins)
+        self._new = [pin for pin in self._new if pin.id not in delivered]
+        retracted = set(outgoing.retractions)
+        self._retracting = [pin for pin in self._retracting if pin.id not in retracted]
+        del self._carried[: outgoing.carried]
+        if outgoing.restated:
+            self._restate = None
+
+    def _trace_outgoing(self, request: int, outgoing: _Outgoing) -> None:
+        """Trace the pins a request delivers, with a receipt after a compaction."""
+        if outgoing.restatement is not None:
+            self._receipt(request, outgoing.restatement)
+        elif not outgoing.restated and (outgoing.pins or outgoing.retractions):
+            self.trace.emit(
+                "pins",
+                request,
+                action="send",
+                pins=list(outgoing.pins),
+                retractions=list(outgoing.retractions),
+            )
+
+    def _receipt(self, request: int, restated: Restatement) -> None:
+        """Check the pins against the summary, when it's readable, and say what was restated."""
+        summary = self._restate.summary if self._restate is not None else None
+        pins = tuple(self._pins.values())
+        kept = kept_in(summary, pins) if summary is not None else None
+        self.trace.emit(
+            "pins",
+            request,
+            action="restate",
+            pins=len(pins),
+            kept=len(kept) if kept is not None else None,
+            missing=[pin.id for pin in pins if pin not in kept] if kept is not None else None,
+            retired=restated.retired,
+            ledger=restated.ledger,
+            tokens=restated.tokens,
+            over_budget=restated.over_budget,
+        )
+        if pins and kept is not None:
+            logger.info(
+                "artiik pins: summary kept %d/%d pins; restated all %d before request %d",
+                len(kept),
+                len(pins),
+                len(pins),
+                request,
+            )
+        elif pins:
+            logger.info(
+                "artiik pins: the summary isn't readable text; restated all %d pins before "
+                "request %d",
+                len(pins),
+                request,
+            )
+        if restated.over_budget:
+            logger.warning(
+                "artiik pins: the restatement takes about %d tokens, over the pin budget of %d",
+                restated.tokens,
+                self.pin_budget,
+            )
 
     def _fit(
         self,
@@ -608,15 +932,17 @@ class Context:
             return size
         before = size
         trims: list[Trim] = []
+        extra = _tally(self._outgoing.messages)
         for _ in range(_GUARD_ROUNDS):
             try:
                 result = trim(
                     self.api,
                     self._history,
                     self._tallies,
-                    size=lambda view: self._scaled(fixed + view, model),
+                    size=lambda view: self._scaled(fixed + view + extra, model),
                     target=math.floor(budget * self.trim_to),
                     limit=budget,
+                    instruction=self._is_own,
                 )
             except BudgetError as error:
                 self._guard_event(request, trims, before, error.needed, fits=False)
@@ -635,6 +961,7 @@ class Context:
             raise BudgetError(size, budget)
         self._guard_event(request, trims, before, size, fits=True)
         validate(self.api, self._history)
+        self._outgoing = self._next_outgoing()
         return size
 
     def _count(
@@ -647,9 +974,12 @@ class Context:
         counter = cast(TokenCounter, self.counter)
         system, tools, params = parts
         exact = counter.count(self.api, self._build(model, system, tools, params))
-        total = fixed + sum(self._tallies, Tally())
+        extra = _tally(self._outgoing.messages)
+        total = fixed + sum(self._tallies, Tally()) + extra
         self.estimator.observe(total, exact, api=self.api, model=model)
-        self._base = _Base(entries=len(self._history), tokens=exact, fixed=fixed, model=model)
+        self._base = _Base(
+            entries=len(self._history), tokens=exact, fixed=fixed, model=model, extra=extra
+        )
         return exact
 
     def _guard_event(
@@ -703,26 +1033,27 @@ class Context:
     ) -> dict[str, Any]:
         request: dict[str, Any] = {"model": model}
         system = copy.deepcopy(system)
+        conversation = [*self._history, *self._outgoing.messages]
         match self.api:
             case Format.ANTHROPIC_MESSAGES:
                 if system is not None:
                     request["system"] = system
                 if tools is not None:
                     request["tools"] = copy.deepcopy(tools)
-                request["messages"] = anthropic_messages.dump_messages(self._history)
+                request["messages"] = anthropic_messages.dump_messages(conversation)
             case Format.OPENAI_RESPONSES:
                 if system is not None:
                     request["instructions"] = system
                 if tools is not None:
                     request["tools"] = copy.deepcopy(tools)
-                request["input"] = openai_responses.dump_items(self._history)
+                request["input"] = openai_responses.dump_items(conversation)
             case Format.OPENAI_CHAT:
                 if tools is not None:
                     request["tools"] = copy.deepcopy(tools)
                 prefix: list[JSONObject] = (
                     [{"role": "system", "content": system}] if system is not None else []
                 )
-                request["messages"] = prefix + openai_chat.dump_messages(self._history)
+                request["messages"] = prefix + openai_chat.dump_messages(conversation)
         request.update(copy.deepcopy(dict(params)))
         if self.compaction is not None:
             self.compaction.configure(self.api, request, self.compact_at or 0)
@@ -874,6 +1205,22 @@ def _compact_at(
     if not compaction.active:
         compaction.configure(api, {}, compact_at or 0)
     return compact_at
+
+
+def _tally(messages: Sequence[Message]) -> Tally:
+    return sum((tally_message(message) for message in messages), Tally())
+
+
+def _pin_role(api: Format, role: str | None) -> Role:
+    allowed = _PIN_ROLES[api]
+    if role is None:
+        return allowed[0]
+    if role not in allowed:
+        raise ValueError(
+            f"pin_role {role!r} isn't available in the {api.value} API; use one of: "
+            + ", ".join(allowed)
+        )
+    return role
 
 
 def _is_instruction(message: Message) -> bool:

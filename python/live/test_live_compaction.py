@@ -1,4 +1,4 @@
-"""Live smoke tests: each compaction strategy against the real provider API.
+"""Live smoke tests: each compaction strategy, and pins, against the real provider API.
 
 Run them by hand after changing provider code (see CONTRIBUTING.md); they cost
 a few cents. A test skips unless ``ARTIIK_LIVE=1`` and its provider's settings
@@ -121,6 +121,35 @@ def test_anthropic_threshold_compaction_is_accepted() -> None:
     print("after compacting:", answered(ctx))
 
 
+def test_anthropic_pins() -> None:
+    anthropic = pytest.importorskip("anthropic")
+    _, model = setting("ANTHROPIC_API_KEY", "ARTIIK_ANTHROPIC_MODEL")
+    client = anthropic.Anthropic()
+    strategy = AnthropicCompaction(client)
+    if not strategy.supports(model):
+        pytest.skip(f"{model} doesn't support compaction on demand")
+    ctx = Context(
+        "anthropic-messages",
+        model=model,
+        system=SYSTEM,
+        compact_at=100_000,
+        compaction=strategy,
+        params={"max_tokens": 300},
+    )
+    # Before the first request, a pin goes in the system prompt; after it, in a system message.
+    ctx.pin("The release is on 14 October.", kind="fact")
+    talk(ctx, client.messages.create, FACTS)
+    ctx.pin("Answer in French.")
+    talk(ctx, client.messages.create, "Is staging healthy?")
+    print("with a pin message:", answered(ctx))
+    ctx.add(user("When is the release?"))
+    result = ctx.compact()
+    assert result is not None and result.outcome == "compacted", result
+    # The restatement goes in a system message after the user turn.
+    ctx.record(client.messages.create(**ctx.prepare()))
+    print("after the restatement:", answered(ctx))
+
+
 # OpenAI
 
 
@@ -167,6 +196,29 @@ def test_openai_compact_endpoint() -> None:
     assert result is not None and result.outcome == "compacted", result
     ctx.record(client.responses.create(**ctx.prepare()))
     print("after compacting again:", answered(ctx))
+
+
+def test_openai_pins() -> None:
+    openai = pytest.importorskip("openai")
+    _, model = setting("OPENAI_API_KEY", "ARTIIK_OPENAI_MODEL")
+    client = openai.OpenAI()
+    ctx = Context(
+        "openai-responses",
+        model=model,
+        system=SYSTEM,
+        compact_at=100_000,
+        compaction=OpenAICompaction(client),
+        params={"max_output_tokens": 300},
+    )
+    ctx.pin("The release is on 14 October.", kind="fact")
+    talk(ctx, client.responses.create, FACTS)
+    ctx.pin("Answer in French.")
+    talk(ctx, client.responses.create, "Is staging healthy?")
+    ctx.add(user("When is the release?"))
+    result = ctx.compact()
+    assert result is not None and result.outcome == "compacted", result
+    ctx.record(client.responses.create(**ctx.prepare()))
+    print("after the restatement:", answered(ctx))
 
 
 def test_chat_completions_with_a_summarize_callable() -> None:

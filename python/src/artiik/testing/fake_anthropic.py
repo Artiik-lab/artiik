@@ -14,7 +14,11 @@ Every request is checked the way the API checks it:
 - compaction at a token threshold (beta ``compact-2026-01-12``): a
   ``compact_20260112`` edit in ``context_management`` compacts inside an
   ordinary request once the input passes its trigger, and the API drops the
-  content before the latest compaction block.
+  content before the latest compaction block;
+- ``role: "system"`` messages inside ``messages`` (Anthropic docs,
+  "Mid-conversation system messages"): not first, right after a user turn
+  (tool results count), before an assistant turn or last, with no
+  ``cache_control``, and only on the models that support them.
 
 ``models.retrieve`` reports each model's capabilities, as the Models API does.
 
@@ -38,6 +42,7 @@ from artiik.messages import (
     JSONObject,
     JSONValue,
     Message,
+    Opaque,
     ToolResult,
     visible,
 )
@@ -74,6 +79,8 @@ class FakeAnthropic:
       family whose tokenizer differs.
     - ``compaction_models`` lists the models that support compaction, on
       demand and at a threshold (``None`` means all of them).
+    - ``system_message_models`` lists the models that take ``system``
+      messages inside ``messages`` (``None`` means all of them).
     - ``faults`` maps a call index to an error to raise on that call, or to a
       stop reason to return instead of the normal answer.
 
@@ -87,6 +94,7 @@ class FakeAnthropic:
         summarizer: Summarizer | None = None,
         context_window: int = 200_000,
         compaction_models: Collection[str] | None = None,
+        system_message_models: Collection[str] | None = None,
         faults: Mapping[int, FakeAPIError | str] | None = None,
         cache_lookback: int = 20,
         tokenizer: Tokenizer | None = None,
@@ -95,6 +103,9 @@ class FakeAnthropic:
         self.summarizer: Summarizer = summarizer if summarizer is not None else DigestSummarizer()
         self.context_window = context_window
         self.compaction_models = None if compaction_models is None else frozenset(compaction_models)
+        self.system_message_models = (
+            None if system_message_models is None else frozenset(system_message_models)
+        )
         self.faults = dict(faults or {})
         self.tokenizer = tokenizer if tokenizer is not None else DEFAULT
         self.calls: list[RecordedCall] = []
@@ -215,6 +226,7 @@ class FakeAnthropic:
         betas = _betas(request)
         self._check_compaction_block(messages, betas, threshold=_has_threshold_edit(request))
         self._check_thinking(raw_messages)
+        self._check_system_messages(model, messages)
         cached = _check_cache_breakpoints(request) > 0
         _check_tool_pairs(visible(FORMAT, messages))
         units = _units(request, messages, system, self.tokenizer, keyed=cached)
@@ -268,6 +280,42 @@ class FakeAnthropic:
                 "The compaction block's content doesn't match its signature.",
                 code="compaction_content_mismatch",
             )
+
+    def _check_system_messages(self, model: str, messages: Sequence[Message]) -> None:
+        """Check where the ``system`` messages inside ``messages`` stand."""
+        for index, message in enumerate(messages):
+            if message.role != "system":
+                continue
+            if self.system_message_models is not None and model not in self.system_message_models:
+                raise _invalid(
+                    f'messages.{index}: model {model} does not support role: "system" '
+                    "messages; use the top-level system parameter"
+                )
+            before = index - 1
+            while before > 0 and messages[before].role == "system":
+                before -= 1
+            previous = messages[before] if index > 0 else None
+            following = messages[index + 1] if index + 1 < len(messages) else None
+            follows_user = previous is not None and (
+                previous.role == "user" or _ends_in_server_tool_result(previous)
+            )
+            if (
+                not follows_user
+                or before < 0
+                or (following is not None and following.role not in ("assistant", "system"))
+            ):
+                raise _invalid(
+                    f'messages.{index}: a role: "system" message with content must '
+                    "immediately follow a user turn (including a user turn carrying tool_result "
+                    "blocks) or an assistant turn ending in a server tool result, or be the "
+                    "last message"
+                )
+            for position, block in enumerate(message.blocks):
+                if "cache_control" in block.extra:
+                    raise _invalid(
+                        f"messages.{index}.content.{position}: cache_control is not permitted "
+                        'on a role: "system" message'
+                    )
 
     def _check_threshold_blocks(self, messages: Sequence[Message], betas: set[str]) -> None:
         """Check the unsigned blocks that threshold compaction returned."""
@@ -529,6 +577,11 @@ def _message(
         "stop_sequence": None,
         "usage": usage,
     }
+
+
+def _ends_in_server_tool_result(message: Message) -> bool:
+    last = message.blocks[-1] if message.role == "assistant" and message.blocks else None
+    return isinstance(last, Opaque) and str(last.data.get("type", "")).endswith("_tool_result")
 
 
 def _check_keywords(method: str, kwargs: Mapping[str, object], beta_only: Collection[str]) -> None:

@@ -12,10 +12,11 @@ from artiik.messages import JSONObject, JSONValue
 class TraceEvent:
     """One thing artiik did or saw, tied to the request it happened on.
 
-    ``kind`` is ``prepare``, ``record`` or ``guard``. ``request`` numbers a
-    context's ``prepare`` calls from 0, counting any that raised; a ``record``
-    event carries the number of the request it answers. ``data`` holds the
-    details, as JSON.
+    ``kind`` is ``prepare``, ``record``, ``guard``, ``compaction`` or ``pins``.
+    ``request`` numbers a context's ``prepare`` calls from 0, counting any that
+    raised; a ``record`` event carries the number of the request it answers,
+    and an event between requests the number of the next one. ``data`` holds
+    the details, as JSON.
     """
 
     kind: str
@@ -34,7 +35,7 @@ class Trace:
         self.events: list[TraceEvent] = []
         self._sink = sink
 
-    def emit(self, kind: str, request: int, **data: JSONValue) -> TraceEvent:
+    def emit(self, kind: str, request: int, /, **data: JSONValue) -> TraceEvent:
         """Record an event."""
         event = TraceEvent(kind=kind, request=request, data=dict(data))
         self.events.append(event)

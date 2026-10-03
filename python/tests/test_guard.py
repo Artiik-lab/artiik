@@ -210,6 +210,24 @@ def test_a_compaction_item_after_kept_user_messages_stays_in_place() -> None:
     assert problems(RESPONSES, result.messages) == []
 
 
+def test_a_moved_instruction_goes_where_anthropic_takes_a_system_message() -> None:
+    history = anthropic(
+        [
+            {"role": "user", "content": "Turn 0."},
+            {"role": "system", "content": "Never touch prod."},
+            {"role": "assistant", "content": "Answer 0."},
+        ],
+        # A turn left without a reply: a system message can't follow it.
+        [{"role": "user", "content": "Turn 1."}],
+        anthropic_turn(2),
+    )
+    # The instruction stays, so the target counts it.
+    trimmed = cut(ANTHROPIC, history, target=total(history[1:2] + history[3:]))
+    assert trimmed.dropped_turns == 1
+    assert texts(trimmed.messages)[:3] == ["Turn 1.", "Turn 2.", "Never touch prod."]
+    assert problems(ANTHROPIC, trimmed.messages) == []
+
+
 def test_a_compaction_block_stays_with_the_results_of_its_calls() -> None:
     # A reply that compacted at a threshold can call tools after its block.
     block: JSONObject = {"type": "compaction", "content": "Summary."}

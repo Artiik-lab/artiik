@@ -6,7 +6,8 @@ into units:
 
 - an **anchor**: a compaction block or item, which stays where it is, with
   the results of any tool calls in the same message;
-- an **instruction**: a system or developer message;
+- an **instruction**: a system or developer message, or a message the caller
+  marks as one, such as a pin message sent with the user role;
 - a **user** unit: a user message that starts a turn;
 - a **step**: a model reply together with the tool results that answer it.
 
@@ -15,7 +16,7 @@ A **turn** is a user unit and the units after it, up to the next user unit.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -33,13 +34,24 @@ class Unit:
     indices: tuple[int, ...]
 
 
-def segment(api: Format, history: Sequence[Message]) -> list[Unit]:
-    """Split a conversation into units, in order."""
+def segment(
+    api: Format,
+    history: Sequence[Message],
+    instruction: Callable[[Message], bool] | None = None,
+) -> list[Unit]:
+    """Split a conversation into units, in order.
+
+    ``instruction`` marks more messages as instructions, besides system and
+    developer messages.
+    """
     units: list[Unit] = []
     index = 0
     while index < len(history):
         message = history[index]
-        if is_anchor(api, message):
+        if instruction is not None and instruction(message):
+            units.append(Unit("instruction", (index,)))
+            index += 1
+        elif is_anchor(api, message):
             end = index + 1
             if message.tool_uses:
                 # A reply that compacted at a threshold can call tools after its block.

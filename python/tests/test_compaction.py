@@ -832,20 +832,30 @@ def test_an_empty_summary_compacts_nothing() -> None:
     assert outcomes(ctx) == [(0, "empty summary")]
 
 
-def test_instructions_in_the_summarized_part_are_kept() -> None:
+def test_instructions_in_the_summarized_part_are_sent_again() -> None:
+    fake = FakeOpenAI(policy=answering())
     ctx = compacting(CHAT, SummaryCompaction(summarize))
     ctx.add({"role": "system", "content": "Answer in French."})
     fill(ctx)
-    ctx.prepare()
-    # The summary covers the instruction too, and the instruction itself stays.
-    assert [(message.role, message.text) for message in ctx.history] == [
-        ("user", "Summary of the conversation so far:\n\n9 messages about logs."),
+    request = ctx.prepare()
+    # The summary covers the instruction too, and the instruction goes again after the
+    # current turn; it joins the history with the reply.
+    summary = "Summary of the conversation so far:\n\n9 messages about logs."
+    assert [(message["role"], message["content"]) for message in request["messages"]] == [
+        ("user", [{"type": "text", "text": summary}]),
         ("user", "Now list the errors."),
         ("system", "Answer in French."),
     ]
     [event] = ctx.trace.of("compaction")
     assert event.data["moved_messages"] == 1
     assert event.data["kept_messages"] == 1
+    ctx.record(fake.chat.completions.create(**request))
+    assert [(message.role, message.text) for message in ctx.history] == [
+        ("user", summary),
+        ("user", "Now list the errors."),
+        ("system", "Answer in French."),
+        ("assistant", "Done."),
+    ]
 
 
 # The context
