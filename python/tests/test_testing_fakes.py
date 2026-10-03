@@ -469,6 +469,74 @@ def test_compaction_unavailable_is_a_529_with_an_error_code() -> None:
 # Anthropic prompt caching
 
 
+def system(text: str) -> JSONObject:
+    return {"role": "system", "content": text}
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param([user("Plan it."), system("Never touch prod.")], id="last"),
+        pytest.param(
+            [user("Plan it."), system("Never touch prod."), system("Use stg-3.")],
+            id="consecutive",
+        ),
+        pytest.param(
+            [user("Plan it."), system("Never touch prod."), assistant("Done.")], id="before-reply"
+        ),
+    ],
+)
+def test_anthropic_takes_system_messages_after_a_user_turn(messages: list[JSONObject]) -> None:
+    fake = FakeAnthropic(policy=replies(Reply(text="ok")))
+    fake.messages.create(model=MODEL, max_tokens=10, messages=messages)
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        pytest.param([system("Be brief."), user("Go")], "must immediately follow", id="first"),
+        pytest.param(
+            [user("Go"), assistant("Done."), system("Be brief.")],
+            "must immediately follow",
+            id="after-a-reply",
+        ),
+        pytest.param(
+            [user("Go"), system("Be brief."), user("Next.")],
+            "must immediately follow",
+            id="before-a-user-turn",
+        ),
+        pytest.param(
+            [
+                user("Go"),
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Be brief.",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+            ],
+            "cache_control is not permitted",
+            id="cache-control",
+        ),
+    ],
+)
+def test_anthropic_rejects_misplaced_system_messages(
+    messages: list[JSONObject], expected: str
+) -> None:
+    with pytest.raises(FakeAPIError, match=expected):
+        FakeAnthropic().messages.create(model=MODEL, max_tokens=10, messages=messages)
+
+
+def test_system_messages_need_a_model_that_takes_them() -> None:
+    fake = FakeAnthropic(system_message_models={"large-model"})
+    with pytest.raises(FakeAPIError, match="does not support role"):
+        fake.messages.create(model=MODEL, max_tokens=10, messages=[user("Go"), system("Be brief.")])
+
+
 def test_an_anthropic_beta_header_replaces_the_betas_list() -> None:
     # The SDK sends betas as the anthropic-beta header, and extra_headers wins.
     fake = FakeAnthropic()

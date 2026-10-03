@@ -6,7 +6,9 @@ the next call: whole user turns first, then the oldest tool steps of the
 current turn. A step is a model reply together with the tool results that
 answer it, so a tool call never loses its result. System and developer
 messages are kept; when their turn goes, they move to just after the first
-user turn that remains. A compaction block or item stays where it is.
+user turn that remains and is followed by a reply (or to the end), where
+Anthropic accepts a system message. A compaction block or item stays where it
+is.
 """
 
 from __future__ import annotations
@@ -44,15 +46,17 @@ def trim(
     size: Callable[[Tally], int],
     target: int,
     limit: int,
+    instruction: Callable[[Message], bool] | None = None,
 ) -> Trim:
     """Drop the oldest turns, then the oldest steps of the current turn, until the request fits.
 
     ``size`` turns the tally of the history into the estimated size of the
     whole request. The guard stops dropping once that size is at most
     ``target``, and raises :class:`~artiik.errors.BudgetError` if it can't get
-    it to ``limit`` or below.
+    it to ``limit`` or below. ``instruction`` marks more messages to keep as
+    instructions, such as pin messages sent with the user role.
     """
-    units = segment(api, history)
+    units = segment(api, history, instruction)
     turns = group(units)
     current = sum(tallies, Tally())
     dropped: set[int] = set()
@@ -104,26 +108,32 @@ def _order(
     dropped: set[int],
     moved: Sequence[int],
 ) -> list[int]:
-    """The positions of the messages that stay, in order, with the moved instructions placed."""
+    """The positions of the messages that stay, in order, with the moved instructions placed.
+
+    The moved instructions go after the first user turn followed by something
+    other than another user turn, or at the end.
+    """
     gone = {
         unit.indices[0]
         for turn in turns
         if (droppable := _droppable(turn)) and all(unit.indices[0] in dropped for unit in droppable)
         for unit in turn
     }
-    order: list[int] = []
-    placed = not moved
-    for unit in units:
-        first = unit.indices[0]
-        if first in gone or (unit.kind in ("user", "step") and first in dropped):
-            continue
-        order.extend(unit.indices)
-        if not placed and unit.kind == "user":
-            order.extend(moved)
-            placed = True
-    if not placed:
-        order.extend(moved)
-    return order
+    kept = [unit for unit in units if not _left_out(unit, gone, dropped)]
+    slot = len(kept)
+    for position, unit in enumerate(kept):
+        following = kept[position + 1] if position + 1 < len(kept) else None
+        if unit.kind == "user" and (following is None or following.kind != "user"):
+            slot = position + 1
+            break
+    before = [index for unit in kept[:slot] for index in unit.indices]
+    after = [index for unit in kept[slot:] for index in unit.indices]
+    return [*before, *moved, *after]
+
+
+def _left_out(unit: Unit, gone: set[int], dropped: set[int]) -> bool:
+    first = unit.indices[0]
+    return first in gone or (unit.kind in ("user", "step") and first in dropped)
 
 
 def _droppable(turn: Sequence[Unit]) -> list[Unit]:

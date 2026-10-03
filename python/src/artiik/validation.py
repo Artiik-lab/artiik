@@ -11,6 +11,10 @@ than a 400 from the API. The rules:
   ``tool`` messages right after the assistant message that made the calls.
 - **Roles.** Each API has its own set, and some blocks belong to one role:
   tool calls and thinking to the assistant, Anthropic tool results to the user.
+- **Anthropic system messages.** A ``system`` message inside ``messages`` can't
+  come first, must follow a user turn (tool results count) and come before an
+  assistant turn or at the end, and can't carry ``cache_control``. Consecutive
+  system messages count as one.
 - **Compaction.** Anthropic takes at most one compaction block, as the first
   block of the first message. A Responses compaction item stands in for the
   items before it, so the pairing rules apply from the latest one on.
@@ -125,7 +129,42 @@ def _anthropic(messages: Sequence[Message]) -> list[str]:
                 )
         if message.role == "user" and message.tool_results:
             found.extend(_anthropic_results(messages, index))
+    found.extend(_anthropic_system(messages))
     return found
+
+
+def _anthropic_system(messages: Sequence[Message]) -> list[str]:
+    """Where Anthropic accepts a ``system`` message inside ``messages``."""
+    found: list[str] = []
+    for index, message in enumerate(messages):
+        if message.role != "system":
+            continue
+        path = f"messages[{index}]"
+        if index == 0:
+            found.append(f"{path}: a system message can't come first; use the system parameter")
+            continue
+        before = index - 1
+        while before > 0 and messages[before].role == "system":
+            before -= 1
+        if not _takes_system_after(messages[before]):
+            found.append(f"{path}: a system message must follow a user turn")
+        following = messages[index + 1] if index + 1 < len(messages) else None
+        if following is not None and following.role not in ("assistant", "system"):
+            found.append(f"{path}: a system message must come before an assistant turn or last")
+        found.extend(
+            f"{path}.content[{position}]: a system message's blocks can't carry cache_control"
+            for position, block in enumerate(message.blocks)
+            if "cache_control" in block.extra
+        )
+    return found
+
+
+def _takes_system_after(message: Message) -> bool:
+    """Whether a system message may follow it: a user turn, or a server tool's result."""
+    if message.role == "user":
+        return True
+    last = message.blocks[-1] if message.role == "assistant" and message.blocks else None
+    return isinstance(last, Opaque) and (last.type or "").endswith("_tool_result")
 
 
 def _anthropic_results(messages: Sequence[Message], index: int) -> list[str]:

@@ -23,7 +23,7 @@ uv build                                         # wheel and sdist
 
 ### Live smoke tests
 
-[`python/live/`](python/live/) has one small test per compaction strategy that calls the real provider APIs. CI never runs them. Run them by hand after changing provider code; a run costs a few cents.
+[`python/live/`](python/live/) has small tests that call the real provider APIs: one per compaction strategy, and one for pins per provider. CI never runs them. Run them by hand after changing provider code; a run costs a few cents.
 
 ```sh
 cd python
