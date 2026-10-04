@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
+        with:
+          # The same exact version as CI, so a release doesn't depend on the GitHub API.
+          version: "0.12.23"
       - run: uv build
       - name: Check that the tag matches the package version
         if: github.event_name == 'push'
