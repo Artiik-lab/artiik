@@ -27,11 +27,11 @@ jobs:
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      # No uv version: setup-uv installs the latest release. Since v7.6 it
+      # resolves it from Astral's versions manifest and downloads it from
+      # Astral's mirror, without calling the GitHub API.
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
-          # An exact version: without one, setup-uv asks the GitHub API for the
-          # latest release on every job, and the job fails when the API does.
-          version: "0.12.23"
           enable-cache: true
           cache-dependency-glob: python/uv.lock
       - run: uv sync --locked
@@ -47,9 +47,7 @@ jobs:
         working-directory: python
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.12.23"
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv build
       - name: Check that the wheel has no required dependencies
         run: |
